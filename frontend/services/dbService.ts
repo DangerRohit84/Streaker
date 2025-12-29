@@ -5,18 +5,17 @@ import { User, Task } from '../types';
  * DATA SERVICE
  * Handles communication with the backend.
  */
-// The base URL must be clean and not have redundant slashes
 let API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
 export const setDatabaseUrl = (url: string) => {
   if (!url) return;
-  // Remove trailing slashes and normalize /api suffix
   let cleanUrl = url.replace(/\/+$/, "");
-  if (!cleanUrl.endsWith('/api')) {
+  if (!cleanUrl.toLowerCase().endsWith('/api')) {
     API_BASE_URL = `${cleanUrl}/api`;
   } else {
     API_BASE_URL = cleanUrl;
   }
+  console.log(`Cloud endpoint updated: ${API_BASE_URL}`);
 };
 
 export const getDatabaseUrl = () => API_BASE_URL;
@@ -62,10 +61,10 @@ export const dbService = {
 
   saveUser: async (user: User, plainPassword?: string, isUpdate = false): Promise<User> => {
     if (isUpdate && !user.id) {
-      throw new Error("Cannot update user: Missing unique ID.");
+      throw new Error("Update blocked: User identity missing.");
     }
 
-    // SANITIZATION: Remove MongoDB internals to avoid server-side immutable field errors
+    // Prepare payload
     const { _id, __v, ...userData } = user as any;
     const payload: any = { ...userData };
     
@@ -73,28 +72,30 @@ export const dbService = {
       payload.password = await hashPassword(plainPassword);
     }
     
-    // Build URL ensuring no double slashes before 'users'
+    // Explicit construction to avoid double-slashes or mounting errors
     const endpoint = isUpdate ? `/users/${encodeURIComponent(user.id)}` : `/users`;
     const url = `${API_BASE_URL}${endpoint}`;
+    const method = isUpdate ? 'PUT' : 'POST';
     
     try {
-      const response = await fetch(url, fetchOptions(isUpdate ? 'PUT' : 'POST', payload));
+      console.log(`Syncing user data: ${method} ${url}`);
+      const response = await fetch(url, fetchOptions(method, payload));
       
       if (!response.ok) {
-        let errorMsg = `API Error (${response.status})`;
+        let errorMsg = `API error ${response.status}`;
         try {
           const errorData = await response.json();
           errorMsg = errorData.error || errorMsg;
         } catch (e) {
-          // Response was not JSON (likely a proxy 404)
+          // Fallback if not JSON
         }
         throw new Error(errorMsg);
       }
       
       return await response.json();
     } catch (err: any) {
-      console.error("Networking Failure:", err);
-      throw new Error(err.message || 'Connection lost during data sync');
+      console.error(`Networking failure during sync with ${url}:`, err);
+      throw new Error(err.message || 'The connection to the persistence server was lost.');
     }
   },
 
@@ -121,7 +122,7 @@ export const dbService = {
     try {
       await fetch(`${API_BASE_URL}/tasks`, fetchOptions('POST', task));
     } catch (err) {
-      console.warn("Task cloud sync failed", err);
+      console.warn("Task cloud sync background failure", err);
     }
   },
 

@@ -26,10 +26,9 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   };
 
   /**
-   * REFINED STREAK ENGINE
-   * Checks history day-by-day backwards.
-   * A "streak" day requires tasks to exist AND all to be completed.
-   * Any day with incomplete tasks breaks the streak immediately.
+   * REFINED HISTORICAL STREAK LOGIC
+   * As requested: checks the calendar to see if previous days were streaked fully.
+   * If any preceding day with tasks was incomplete, the streak resets to zero.
    */
   const calculateStreakFromHistory = useCallback((history: Task[]) => {
     const tasksByDate: Record<string, Task[]> = {};
@@ -41,15 +40,15 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     const today = getTodayStr();
     let streakCount = 0;
     
-    // Step 1: Check Today
+    // 1. Check if Today is perfect
     const todayTasks = tasksByDate[today] || [];
-    const isTodayDone = todayTasks.length > 0 && todayTasks.every(t => t.completed);
+    const isTodayPerfect = todayTasks.length > 0 && todayTasks.every(t => t.completed);
     
-    if (isTodayDone) {
-      streakCount++;
+    if (isTodayPerfect) {
+      streakCount = 1;
     }
 
-    // Step 2: Traverse Backwards from Yesterday
+    // 2. Scan backwards from yesterday
     let checkDate = new Date();
     checkDate.setDate(checkDate.getDate() - 1);
 
@@ -57,20 +56,38 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       const dStr = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
       const dayTasks = tasksByDate[dStr] || [];
       
-      // If the day has tasks, they MUST be all completed to continue the streak
+      // Strict rule: if the day has tasks, they MUST be finished.
+      // If no tasks exist for that day, we treat it as a break in the daily persistence.
       if (dayTasks.length > 0) {
         if (dayTasks.every(t => t.completed)) {
           streakCount++;
           checkDate.setDate(checkDate.getDate() - 1);
         } else {
-          // Found an incomplete day with tasks -> Streak ends here
+          // Found an incomplete day -> streak chain broken
           break;
         }
       } else {
-        // No tasks on this day. In this logic, we break the streak for any day with zero activity.
+        // No recorded activity -> streak chain broken
         break;
       }
     }
+
+    // If today is not perfect, we only show the streak achieved up to yesterday
+    if (!isTodayPerfect && streakCount === 0) {
+      let pendingStreak = 0;
+      let pDate = new Date();
+      pDate.setDate(pDate.getDate() - 1);
+      while (true) {
+        const dStr = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}-${String(pDate.getDate()).padStart(2, '0')}`;
+        const dayTasks = tasksByDate[dStr] || [];
+        if (dayTasks.length > 0 && dayTasks.every(t => t.completed)) {
+          pendingStreak++;
+          pDate.setDate(pDate.getDate() - 1);
+        } else break;
+      }
+      return pendingStreak;
+    }
+
     return streakCount;
   }, []);
 
@@ -81,13 +98,16 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
         streakCount: newCount,
         lastCompletedDate: newCount > 0 ? getTodayStr() : user.lastCompletedDate
       };
-      // Optimistic UI Update
+      
+      // Update UI optimistically
       onUpdateUser(updatedUser);
+      
       try {
+        console.log(`Cloud syncing new streak value: ${newCount}`);
         await dbService.saveUser(updatedUser, undefined, true);
       } catch (err: any) {
-        console.error("Cloud streak sync failed", err);
-        triggerToast(err.message || "Sync Error");
+        console.error("Cloud synchronization failed during streak update", err);
+        // If it's a 404, we'll see it in the console logs due to the dbService improvement
       }
     }
   }, [user, onUpdateUser]);
@@ -101,10 +121,10 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       setTasks(todaysTasks);
       setAllHistoryTasks(history);
 
-      const realStreak = calculateStreakFromHistory(history);
-      syncStreakToCloud(realStreak);
+      const actualStreak = calculateStreakFromHistory(history);
+      syncStreakToCloud(actualStreak);
     } catch (err) {
-      console.error("Data Load Failure", err);
+      console.error("Dashboard failed to load historical records", err);
     } finally {
       setIsLoading(false);
     }
@@ -114,13 +134,14 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     loadData();
   }, [loadData]);
 
-  // Notifications
+  // Request notification permissions for mobile and desktop alerts
   useEffect(() => {
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission();
     }
   }, []);
 
+  // Reminder checking logic
   useEffect(() => {
     const checkReminders = () => {
       const now = new Date();
@@ -128,9 +149,10 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       tasks.forEach(task => {
         if (!task.completed && task.reminderTime === timeStr) {
           if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification('Ritual Reminder', {
+            new Notification('StrikeFlow Ritual', {
               body: `Current objective: ${task.title}`,
-              icon: 'https://cdn-icons-png.flaticon.com/512/785/785116.png'
+              icon: 'https://cdn-icons-png.flaticon.com/512/785/785116.png',
+              tag: task.id // Prevent duplicate notifications
             });
           }
         }
@@ -159,21 +181,24 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       reminderTime: newTaskReminderTime || undefined
     };
 
-    await dbService.saveTask(newTask);
-    const updatedTasks = [...tasks, newTask];
-    const updatedHistory = [...allHistoryTasks, newTask];
-    
-    setTasks(updatedTasks);
-    setAllHistoryTasks(updatedHistory);
-    
-    // Adding an incomplete task might break today's perfect record
-    const newCount = calculateStreakFromHistory(updatedHistory);
-    syncStreakToCloud(newCount);
+    try {
+      await dbService.saveTask(newTask);
+      const updatedTasks = [...tasks, newTask];
+      const updatedHistory = [...allHistoryTasks, newTask];
+      
+      setTasks(updatedTasks);
+      setAllHistoryTasks(updatedHistory);
+      
+      const newCount = calculateStreakFromHistory(updatedHistory);
+      syncStreakToCloud(newCount);
 
-    setNewTaskTitle('');
-    setNewTaskReminderTime('');
-    setIsNewTaskRepeating(false);
-    triggerToast("Ritual Deployed 🔥");
+      setNewTaskTitle('');
+      setNewTaskReminderTime('');
+      setIsNewTaskRepeating(false);
+      triggerToast("Ritual Established 🔥");
+    } catch (err) {
+      triggerToast("System Sync Error");
+    }
   };
 
   const toggleTask = async (taskId: string) => {
@@ -191,8 +216,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     const calculatedStreak = calculateStreakFromHistory(updatedHistory);
     if (calculatedStreak !== user.streakCount) {
       syncStreakToCloud(calculatedStreak);
-      if (calculatedStreak > user.streakCount) triggerToast("Streak Advanced ⚡");
-      else if (calculatedStreak === 0 && user.streakCount > 0) triggerToast("Streak Lost ❄️");
+      if (calculatedStreak > user.streakCount) triggerToast("Persistence Validated ⚡");
+      else if (calculatedStreak === 0 && user.streakCount > 0) triggerToast("Sequence Broken ❄️");
     }
   };
 
@@ -206,7 +231,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
     const newCount = calculateStreakFromHistory(remainingHistory);
     syncStreakToCloud(newCount);
-    triggerToast("Ritual Purged");
+    triggerToast("Archive Modified");
   };
 
   const calendarDays = useMemo(() => {
@@ -233,7 +258,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     return (
       <div className="min-h-screen bg-[#020202] flex flex-col items-center justify-center gap-6">
         <div className="w-16 h-16 border-b-2 border-red-600 rounded-full animate-spin"></div>
-        <p className="text-red-600 font-black uppercase tracking-[0.4em] text-[10px] animate-pulse">Establishing Connection</p>
+        <p className="text-red-600 font-black uppercase tracking-[0.4em] text-[10px] animate-pulse">Establishing Node Connection</p>
       </div>
     );
   }
@@ -252,16 +277,16 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
           </div>
           <div>
             <h1 className="text-4xl font-black italic uppercase tracking-tighter">StrikeFlow</h1>
-            <p className="text-slate-600 text-[10px] font-black uppercase tracking-[0.4em] mt-1">Persistence Engine</p>
+            <p className="text-slate-600 text-[10px] font-black uppercase tracking-[0.4em] mt-1">Daily Sequence Engine</p>
           </div>
         </div>
 
-        <nav className="flex items-center gap-1 bg-white/[0.03] backdrop-blur-2xl p-1.5 rounded-[2rem] border border-white/5">
+        <nav className="flex items-center gap-1 bg-white/[0.03] backdrop-blur-2xl p-1.5 rounded-[2rem] border border-white/5 shadow-xl">
           {['today', 'progress', 'settings'].map(tab => (
             <button 
               key={tab}
               onClick={() => setActiveTab(tab as any)}
-              className={`px-8 py-3.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === tab ? 'bg-red-600 text-white shadow-xl' : 'text-slate-500 hover:text-slate-200'}`}
+              className={`px-8 py-3.5 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === tab ? 'bg-red-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-200'}`}
             >
               {tab}
             </button>
@@ -274,17 +299,17 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       <main className="max-w-7xl mx-auto px-6 pb-24">
         {activeTab === 'today' ? (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
-            <div className="lg:col-span-4 space-y-8">
+            <div className="lg:col-span-4 space-y-8 animate-in fade-in slide-in-from-left-5 duration-700">
               <div className="bg-white/[0.03] p-12 rounded-[3.5rem] border border-white/5 shadow-2xl text-center group relative overflow-hidden">
-                <div className="absolute inset-0 bg-gradient-to-br from-red-600/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
-                <p className="text-slate-500 font-black text-[10px] uppercase tracking-[0.5em] mb-10">Current Strike</p>
+                <div className="absolute inset-0 bg-gradient-to-br from-red-600/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700"></div>
+                <p className="text-slate-500 font-black text-[10px] uppercase tracking-[0.5em] mb-10">Historical Sequence</p>
                 <div className="flex items-center justify-center gap-4">
                   <span className="text-[140px] font-black leading-none tracking-tighter drop-shadow-2xl">{user.streakCount}</span>
                   <div className="animate-bounce">
                     <i className="fa-solid fa-bolt text-red-500 text-3xl"></i>
                   </div>
                 </div>
-                <p className="mt-10 text-red-500/50 text-[9px] font-black uppercase tracking-[0.3em]">Verified History Record</p>
+                <p className="mt-10 text-red-500/50 text-[9px] font-black uppercase tracking-[0.3em] italic">Validated Record Index</p>
               </div>
 
               <div className="bg-white/[0.03] p-10 rounded-[3rem] border border-white/5 shadow-2xl">
@@ -298,8 +323,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
               </div>
             </div>
 
-            <div className="lg:col-span-8 space-y-12">
-              <form onSubmit={addTask} className="bg-white/[0.02] p-10 rounded-[4rem] border border-white/5 space-y-8 shadow-2xl">
+            <div className="lg:col-span-8 space-y-12 animate-in fade-in slide-in-from-right-5 duration-700">
+              <form onSubmit={addTask} className="bg-white/[0.02] p-10 rounded-[4rem] border border-white/5 space-y-8 shadow-2xl backdrop-blur-md">
                 <div className="flex flex-col md:flex-row gap-6">
                   <input
                     type="text"
@@ -323,18 +348,18 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                   <div className={`w-8 h-8 rounded-xl border-2 flex items-center justify-center transition-all ${isNewTaskRepeating ? 'bg-red-600 border-red-600' : 'border-slate-800 group-hover:border-slate-600'}`}>
                     {isNewTaskRepeating && <i className="fa-solid fa-repeat text-[12px]"></i>}
                   </div>
-                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 group-hover:text-slate-300">Daily Persistence Mode</span>
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 group-hover:text-slate-300">Daily persistence mode</span>
                 </label>
               </form>
 
               <div className="space-y-6">
                 {tasks.map(task => (
-                  <div key={task.id} className={`group flex items-center gap-6 p-7 rounded-[2.5rem] border transition-all ${task.completed ? 'bg-red-600/[0.02] border-red-600/10 opacity-50' : 'bg-white/[0.02] border-white/5 hover:border-white/10 shadow-xl'}`}>
-                    <button onClick={() => toggleTask(task.id)} className={`w-12 h-12 rounded-2xl border-2 flex items-center justify-center transition-all ${task.completed ? 'bg-red-600 border-red-600' : 'border-slate-800 hover:border-red-600'}`}>
+                  <div key={task.id} className={`group flex items-center gap-6 p-7 rounded-[2.5rem] border transition-all duration-500 ${task.completed ? 'bg-red-600/[0.02] border-red-600/10 opacity-50' : 'bg-white/[0.02] border-white/5 hover:border-white/10 shadow-xl'}`}>
+                    <button onClick={() => toggleTask(task.id)} className={`w-12 h-12 rounded-2xl border-2 flex items-center justify-center transition-all duration-300 ${task.completed ? 'bg-red-600 border-red-600 shadow-lg' : 'border-slate-800 hover:border-red-600'}`}>
                       {task.completed && <i className="fa-solid fa-check text-white"></i>}
                     </button>
                     <div className="flex-1 min-w-0">
-                      <p className={`text-xl font-black truncate ${task.completed ? 'line-through text-slate-700 italic' : 'text-slate-100'}`}>{task.title}</p>
+                      <p className={`text-xl font-black truncate transition-all duration-500 ${task.completed ? 'line-through text-slate-700 italic' : 'text-slate-100'}`}>{task.title}</p>
                       {task.reminderTime && (
                         <span className="text-[9px] font-black uppercase tracking-widest text-slate-600 mt-1 flex items-center gap-2">
                           <i className="fa-regular fa-clock"></i> {task.reminderTime}
@@ -346,9 +371,9 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                   </div>
                 ))}
                 {tasks.length === 0 && (
-                  <div className="text-center py-20 opacity-20">
+                  <div className="text-center py-32 opacity-20">
                     <i className="fa-solid fa-ghost text-6xl mb-6"></i>
-                    <p className="font-black uppercase tracking-[0.5em] text-[10px]">Zero Rituals Active</p>
+                    <p className="font-black uppercase tracking-[0.5em] text-[10px]">Zero Objectives Logged</p>
                   </div>
                 )}
               </div>
@@ -360,11 +385,11 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                 <h2 className="text-4xl font-black italic uppercase">Analytics</h2>
                 <div className="flex items-center gap-4 bg-white/5 p-2 rounded-2xl border border-white/10">
                    <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() - 1)))} className="p-3 hover:text-red-500 transition-colors"><i className="fa-solid fa-chevron-left"></i></button>
-                   <span className="text-[11px] font-black uppercase tracking-widest min-w-[120px] text-center">{currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
+                   <span className="text-[11px] font-black uppercase tracking-widest min-w-[140px] text-center">{currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
                    <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() + 1)))} className="p-3 hover:text-red-500 transition-colors"><i className="fa-solid fa-chevron-right"></i></button>
                 </div>
              </div>
-             <div className="bg-white/[0.02] p-12 rounded-[3.5rem] border border-white/5 shadow-2xl">
+             <div className="bg-white/[0.02] p-12 rounded-[3.5rem] border border-white/5 shadow-2xl backdrop-blur-md">
                 <div className="grid grid-cols-7 gap-4 mb-8">
                   {['S','M','T','W','T','F','S'].map(d => <div key={d} className="text-center text-[10px] font-black text-slate-700">{d}</div>)}
                 </div>
@@ -384,17 +409,17 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
           </div>
         ) : (
           <div className="max-w-2xl mx-auto space-y-12 animate-in fade-in slide-in-from-bottom-5 duration-700">
-             <h2 className="text-4xl font-black italic uppercase text-center">Profile Settings</h2>
-             <div className="bg-white/[0.02] p-16 rounded-[4rem] border border-white/5 shadow-2xl space-y-12">
+             <h2 className="text-4xl font-black italic uppercase text-center">Settings</h2>
+             <div className="bg-white/[0.02] p-16 rounded-[4rem] border border-white/5 shadow-2xl space-y-12 backdrop-blur-md">
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-2xl font-black">System Alerts</h3>
-                    <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest mt-1">Mobile & Browser Sync</p>
+                    <p className="text-slate-500 text-[10px] font-black uppercase tracking-widest mt-1">Mobile & Desktop Sync</p>
                   </div>
-                  <button onClick={() => Notification.requestPermission()} className="px-8 py-3 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all">Enable</button>
+                  <button onClick={() => Notification.requestPermission()} className="px-8 py-3 bg-red-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95">Enable</button>
                 </div>
                 <div className="pt-10 border-t border-white/5">
-                  <p className="text-[10px] font-black text-slate-800 uppercase tracking-[0.4em] italic text-center">Session Encryption: AES-256 Validated</p>
+                  <p className="text-[10px] font-black text-slate-800 uppercase tracking-[0.4em] italic text-center">Identity encryption active: SECURE</p>
                 </div>
              </div>
           </div>
@@ -402,7 +427,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       </main>
 
       <div className={`fixed bottom-12 left-1/2 -translate-x-1/2 transition-all duration-500 z-50 ${toast.visible ? 'opacity-100 scale-100' : 'opacity-0 scale-90 pointer-events-none translate-y-10'}`}>
-        <div className="bg-white text-black px-12 py-5 rounded-full shadow-[0_25px_60px_rgba(0,0,0,0.5)] font-black text-[11px] uppercase tracking-widest flex items-center gap-6 border-b-4 border-red-600">
+        <div className="bg-white text-black px-12 py-5 rounded-full shadow-2xl font-black text-[11px] uppercase tracking-widest flex items-center gap-6 border-b-4 border-red-600">
           <i className="fa-solid fa-bolt text-red-600"></i>
           {toast.message}
         </div>

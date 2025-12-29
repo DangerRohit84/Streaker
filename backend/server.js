@@ -22,7 +22,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Request logger for debugging 404s
+// Request logger for diagnostic purposes
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} [${req.method}] ${req.url}`);
   next();
@@ -49,6 +49,12 @@ app.use(session({
     sameSite: 'none'
   }
 }));
+
+/**
+ * DIRECT API ROUTES
+ * Defining routes directly on 'app' with the prefix is the most reliable 
+ * way to ensure they are matched correctly by the Express routing engine.
+ */
 
 app.get('/api/health', (req, res) => res.sendStatus(200));
 
@@ -79,7 +85,7 @@ app.post('/api/login', async (req, res) => {
   if (user) {
     req.session.userId = user.id;
     req.session.save((err) => {
-      if (err) return res.status(500).json({ error: 'Session failed' });
+      if (err) return res.status(500).json({ error: 'Session save failed' });
       res.json(user);
     });
   } else {
@@ -93,7 +99,7 @@ app.post('/api/users', async (req, res) => {
     await newUser.save();
     req.session.userId = newUser.id;
     req.session.save((err) => {
-      if (err) return res.status(500).json({ error: 'Session failed' });
+      if (err) return res.status(500).json({ error: 'Session save failed' });
       res.json(newUser);
     });
   } catch (err) {
@@ -104,12 +110,13 @@ app.post('/api/users', async (req, res) => {
   }
 });
 
+// Primary update route - explicitly handling the :id parameter
 app.put('/api/users/:id', async (req, res) => {
   const userId = req.params.id;
+  console.log(`Update request for user: ${userId}`);
   try {
     const { password, _id, __v, id, ...updateData } = req.body;
     
-    // Explicitly search by the custom 'id' field
     const updatedUser = await User.findOneAndUpdate(
       { id: userId },
       { $set: updateData },
@@ -117,14 +124,14 @@ app.put('/api/users/:id', async (req, res) => {
     );
     
     if (!updatedUser) {
-      console.warn(`User mismatch: ID ${userId} not found in database.`);
-      return res.status(404).json({ error: `Identity record mismatch (ID: ${userId}). Update aborted.` });
+      console.warn(`Record match failed for user ID: ${userId}`);
+      return res.status(404).json({ error: `User ${userId} not found in the persistence layer.` });
     }
     
     res.json(updatedUser);
   } catch (err) {
-    console.error("Update Failure:", err);
-    res.status(500).json({ error: 'System synchronization failed' });
+    console.error("System synchronization failed during update:", err);
+    res.status(500).json({ error: 'Critical system synchronization failure' });
   }
 });
 
@@ -170,9 +177,17 @@ app.post('/api/logout', (req, res) => {
   res.sendStatus(200);
 });
 
-// JSON fallback for undefined paths to assist frontend error parsing
+// Catch-all 404 handler with detailed error feedback
 app.use((req, res) => {
-  res.status(404).json({ error: `Path [${req.method}] ${req.url} is undefined on this server.` });
+  console.log(`Fallback 404 reached for: [${req.method}] ${req.url}`);
+  res.status(404).json({ 
+    error: `Logical path [${req.method}] ${req.url} is undefined on this server instance.`,
+    debugInfo: {
+      method: req.method,
+      url: req.url,
+      path: req.path
+    }
+  });
 });
 
-app.listen(PORT, () => console.log(`🚀 Ready on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 persistence-api-node online on port ${PORT}`));
