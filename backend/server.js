@@ -20,7 +20,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 
 // Allow the app to talk to this server
 app.use(cors({
-  origin: true,
+  origin: 'https://streaker-9yrh.onrender.com',
   credentials: true
 }));
 app.use(express.json());
