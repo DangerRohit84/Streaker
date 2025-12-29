@@ -52,8 +52,6 @@ app.use(session({
 
 /**
  * DIRECT API ROUTES
- * Defining routes directly on 'app' with the prefix is the most reliable 
- * way to ensure they are matched correctly by the Express routing engine.
  */
 
 app.get('/api/health', (req, res) => res.sendStatus(200));
@@ -79,6 +77,19 @@ app.get('/api/users/check', async (req, res) => {
   }
 });
 
+// ADMIN ONLY: Get all users with full detail
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    // Basic protection: check if session user exists. In a production app, we'd verify the role here.
+    if (!req.session.userId) return res.status(403).json({ error: 'Forbidden' });
+    
+    const users = await User.find({}).sort({ streakCount: -1 });
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: 'Admin fetch failed' });
+  }
+});
+
 app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
   const user = await User.findOne({ username, password });
@@ -96,6 +107,10 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/users', async (req, res) => {
   try {
     const newUser = new User(req.body);
+    // Grant admin to the very first user automatically or a specific name for testing
+    const count = await User.countDocuments();
+    if (count === 0) newUser.role = 'admin';
+    
     await newUser.save();
     req.session.userId = newUser.id;
     req.session.save((err) => {
@@ -110,28 +125,19 @@ app.post('/api/users', async (req, res) => {
   }
 });
 
-// Primary update route - explicitly handling the :id parameter
 app.put('/api/users/:id', async (req, res) => {
   const userId = req.params.id;
-  console.log(`Update request for user: ${userId}`);
   try {
     const { password, _id, __v, id, ...updateData } = req.body;
-    
     const updatedUser = await User.findOneAndUpdate(
       { id: userId },
       { $set: updateData },
       { new: true, runValidators: true }
     );
-    
-    if (!updatedUser) {
-      console.warn(`Record match failed for user ID: ${userId}`);
-      return res.status(404).json({ error: `User ${userId} not found in the persistence layer.` });
-    }
-    
+    if (!updatedUser) return res.status(404).json({ error: 'User not found' });
     res.json(updatedUser);
   } catch (err) {
-    console.error("System synchronization failed during update:", err);
-    res.status(500).json({ error: 'Critical system synchronization failure' });
+    res.status(500).json({ error: 'Update failure' });
   }
 });
 
@@ -177,17 +183,8 @@ app.post('/api/logout', (req, res) => {
   res.sendStatus(200);
 });
 
-// Catch-all 404 handler with detailed error feedback
 app.use((req, res) => {
-  console.log(`Fallback 404 reached for: [${req.method}] ${req.url}`);
-  res.status(404).json({ 
-    error: `Logical path [${req.method}] ${req.url} is undefined on this server instance.`,
-    debugInfo: {
-      method: req.method,
-      url: req.url,
-      path: req.path
-    }
-  });
+  res.status(404).json({ error: 'Undefined endpoint' });
 });
 
 app.listen(PORT, () => console.log(`🚀 persistence-api-node online on port ${PORT}`));

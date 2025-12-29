@@ -63,39 +63,18 @@ export const dbService = {
     if (isUpdate && !user.id) {
       throw new Error("Update blocked: User identity missing.");
     }
-
-    // Prepare payload
     const { _id, __v, ...userData } = user as any;
     const payload: any = { ...userData };
-    
-    if (plainPassword) {
-      payload.password = await hashPassword(plainPassword);
-    }
-    
-    // Explicit construction to avoid double-slashes or mounting errors
+    if (plainPassword) payload.password = await hashPassword(plainPassword);
     const endpoint = isUpdate ? `/users/${encodeURIComponent(user.id)}` : `/users`;
     const url = `${API_BASE_URL}${endpoint}`;
     const method = isUpdate ? 'PUT' : 'POST';
-    
     try {
-      console.log(`Syncing user data: ${method} ${url}`);
       const response = await fetch(url, fetchOptions(method, payload));
-      
-      if (!response.ok) {
-        let errorMsg = `API error ${response.status}`;
-        try {
-          const errorData = await response.json();
-          errorMsg = errorData.error || errorMsg;
-        } catch (e) {
-          // Fallback if not JSON
-        }
-        throw new Error(errorMsg);
-      }
-      
+      if (!response.ok) throw new Error(`API error ${response.status}`);
       return await response.json();
     } catch (err: any) {
-      console.error(`Networking failure during sync with ${url}:`, err);
-      throw new Error(err.message || 'The connection to the persistence server was lost.');
+      throw new Error(err.message || 'Connection lost.');
     }
   },
 
@@ -122,7 +101,7 @@ export const dbService = {
     try {
       await fetch(`${API_BASE_URL}/tasks`, fetchOptions('POST', task));
     } catch (err) {
-      console.warn("Task cloud sync background failure", err);
+      console.warn("Task cloud sync failure", err);
     }
   },
 
@@ -149,6 +128,15 @@ export const dbService = {
   getUsers: async (): Promise<User[]> => {
     try {
       const response = await fetch(`${API_BASE_URL}/users/check`, { credentials: 'include' });
+      return response.ok ? await response.json() : [];
+    } catch {
+      return [];
+    }
+  },
+
+  getAdminUsers: async (): Promise<User[]> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/admin/users`, { credentials: 'include' });
       return response.ok ? await response.json() : [];
     } catch {
       return [];

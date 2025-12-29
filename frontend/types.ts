@@ -3,6 +3,7 @@ export interface User {
   id: string;
   username: string;
   password?: string;
+  role?: 'admin' | 'user';
   email: string;
   streakCount: number;
   lastCompletedDate: string | null;
