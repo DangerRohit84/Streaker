@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { dbService, setDatabaseUrl, getDatabaseUrl } from '../services/dbService';
+import { dbService } from '../services/dbService';
 import { User } from '../types';
 
 interface AuthPageProps {
@@ -14,18 +14,6 @@ const AuthPage: React.FC<AuthPageProps> = ({ onLogin }) => {
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  
-  // Database setup state
-  const [showDbLink, setShowDbLink] = useState(false);
-  const [dbUrl, setDbUrl] = useState(getDatabaseUrl());
-  const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
-
-  const testConnection = async () => {
-    setConnectionStatus('testing');
-    setDatabaseUrl(dbUrl);
-    const ok = await dbService.ping();
-    setConnectionStatus(ok ? 'connected' : 'error');
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,12 +26,12 @@ const AuthPage: React.FC<AuthPageProps> = ({ onLogin }) => {
         if (user) {
           onLogin(user);
         } else {
-          setError('Wrong name or password. Please try again.');
+          setError('Invalid credentials. Check your name and password.');
         }
       } else {
         const users = await dbService.getUsers();
         if (users.some(u => u.username === username)) {
-          setError('That name is already taken. Try another one!');
+          setError('Username already taken.');
           return;
         }
         
@@ -59,145 +47,105 @@ const AuthPage: React.FC<AuthPageProps> = ({ onLogin }) => {
         const savedUser = await dbService.saveUser(newUser, password);
         onLogin(savedUser);
       }
-    } catch (err) {
-      setError('Cannot connect to your data. Make sure the link is correct.');
+    } catch (err: any) {
+      setError(err.message || 'Identity verification failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-black p-4">
-      {/* Background decorations */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-10%] right-[-10%] w-[40%] h-[40%] bg-red-900/10 blur-[120px] rounded-full"></div>
-        <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] bg-red-900/10 blur-[120px] rounded-full"></div>
-      </div>
+    <div className="min-h-screen flex items-center justify-center bg-[#020202] p-4 relative overflow-hidden font-sans">
+      {/* Cinematic Background */}
+      <div className="absolute top-[-20%] right-[-10%] w-[60%] h-[60%] bg-red-900/10 blur-[150px] rounded-full"></div>
+      <div className="absolute bottom-[-20%] left-[-10%] w-[60%] h-[60%] bg-red-900/10 blur-[150px] rounded-full"></div>
+      <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-[0.03] contrast-150 pointer-events-none"></div>
 
-      <div className="max-w-md w-full space-y-8 bg-[#0a0a0a] p-10 rounded-[40px] border border-white/5 shadow-2xl relative z-10 overflow-hidden">
-        {/* Connection toggle */}
-        {/* <button 
-          onClick={() => setShowDbLink(!showDbLink)}
-          className={`absolute top-8 right-8 w-10 h-10 rounded-full flex items-center justify-center transition-all ${showDbLink ? 'bg-blue-600 text-white rotate-90' : 'bg-white/5 text-slate-500 hover:text-white'}`}
-          title="Connection Settings"
-        >
-          <i className="fa-solid fa-link text-sm"></i>
-        </button> */}
+      <div className="max-w-md w-full space-y-10 bg-white/[0.02] backdrop-blur-3xl p-10 md:p-14 rounded-[3.5rem] border border-white/5 shadow-2xl relative z-10 animate-in fade-in zoom-in-95 duration-700">
+        <div className="text-center">
+          <div className="inline-flex items-center justify-center w-24 h-24 rounded-[2rem] bg-gradient-to-br from-red-600 to-red-800 shadow-[0_20px_50px_rgba(220,38,38,0.4)] mb-10 transform -rotate-3 hover:rotate-0 transition-transform duration-500">
+            <i className="fa-solid fa-fire text-5xl text-white"></i>
+          </div>
+          <h2 className="text-5xl font-black text-white tracking-tighter italic uppercase leading-none">StrikeFlow</h2>
+          <p className="mt-5 text-slate-500 text-[10px] font-black uppercase tracking-[0.5em]">
+            {isLogin ? 'Establish Authentication' : 'Begin Your Ascent'}
+          </p>
+        </div>
 
-        {showDbLink ? (
-          <div className="py-4 animate-in fade-in zoom-in-95 duration-300">
-            <h3 className="text-xl font-black italic uppercase tracking-tighter mb-2">Data Connection</h3>
-            <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-8">Where we save your habits</p>
+        <form className="space-y-6" onSubmit={handleSubmit}>
+          {error && (
+            <div className="bg-red-500/10 border border-red-500/20 text-red-500 p-5 rounded-2xl text-[9px] font-black uppercase tracking-[0.2em] text-center animate-bounce">
+              <i className="fa-solid fa-triangle-exclamation mr-2"></i> {error}
+            </div>
+          )}
+          
+          <div className="space-y-4">
+            <div className="relative group">
+              <input
+                type="text"
+                required
+                disabled={isLoading}
+                className="w-full px-8 py-5 bg-black/50 border border-white/10 rounded-2xl text-white font-bold focus:ring-2 focus:ring-red-600 focus:outline-none transition-all placeholder:text-slate-800 text-lg"
+                placeholder="Username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+              />
+              <i className="fa-solid fa-user absolute right-6 top-1/2 -translate-y-1/2 text-slate-800 group-focus-within:text-red-600 transition-colors"></i>
+            </div>
             
-            <div className="space-y-6">
-              <div>
-                <label className="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em] block mb-2 ml-1">Server Address</label>
-                <input 
-                  type="text" 
-                  value={dbUrl}
-                  onChange={(e) => setDbUrl(e.target.value)}
-                  placeholder="https://your-server.com/api"
-                  className="w-full px-5 py-4 bg-black border border-slate-800 rounded-2xl text-white font-mono text-xs focus:ring-2 focus:ring-blue-600 focus:outline-none transition-all"
+            {!isLogin && (
+              <div className="relative group">
+                <input
+                  type="email"
+                  required
+                  disabled={isLoading}
+                  className="w-full px-8 py-5 bg-black/50 border border-white/10 rounded-2xl text-white font-bold focus:ring-2 focus:ring-red-600 focus:outline-none transition-all placeholder:text-slate-800 text-lg"
+                  placeholder="Email Address"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                 />
+                <i className="fa-solid fa-envelope absolute right-6 top-1/2 -translate-y-1/2 text-slate-800 group-focus-within:text-red-600 transition-colors"></i>
               </div>
-
-              <button 
-                onClick={testConnection}
-                className={`w-full py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all flex items-center justify-center gap-3 ${
-                  connectionStatus === 'connected' ? 'bg-green-600' : 
-                  connectionStatus === 'error' ? 'bg-red-600' : 'bg-white/10 hover:bg-white/20'
-                }`}
-              >
-                {connectionStatus === 'testing' ? 'Checking...' : connectionStatus === 'idle' ? 'Link & Test' : connectionStatus === 'connected' ? 'Connected!' : 'Connection Failed'}
-              </button>
-
-              <button 
-                onClick={() => setShowDbLink(false)}
-                className="w-full text-slate-500 font-bold text-[10px] uppercase tracking-widest hover:text-white transition-colors"
-              >
-                Go Back
-              </button>
+            )}
+            
+            <div className="relative group">
+              <input
+                type="password"
+                required
+                disabled={isLoading}
+                className="w-full px-8 py-5 bg-black/50 border border-white/10 rounded-2xl text-white font-bold focus:ring-2 focus:ring-red-600 focus:outline-none transition-all placeholder:text-slate-800 text-lg"
+                placeholder="Access Token"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+              <i className="fa-solid fa-lock absolute right-6 top-1/2 -translate-y-1/2 text-slate-800 group-focus-within:text-red-600 transition-colors"></i>
             </div>
           </div>
-        ) : (
-          <>
-            <div className="text-center">
-              <div className="inline-flex items-center justify-center w-20 h-20 rounded-[28px] bg-red-600 shadow-[0_0_30px_rgba(220,38,38,0.3)] mb-8">
-                <i className="fa-solid fa-fire text-4xl text-white"></i>
-              </div>
-              <h2 className="text-4xl font-black text-white tracking-tighter italic uppercase">StreakFlow</h2>
-              <p className="mt-2 text-slate-500 text-sm font-medium">
-                {isLogin ? 'Welcome back! Sign in to continue.' : 'Start tracking your habits today.'}
-              </p>
-            </div>
 
-            <form className="mt-10 space-y-6" onSubmit={handleSubmit}>
-              {error && (
-                <div className="bg-red-500/10 border border-red-500/20 text-red-500 p-4 rounded-2xl text-xs font-bold text-center">
-                  {error}
-                </div>
-              )}
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em] block mb-2 ml-1">Your Name</label>
-                  <input
-                    type="text"
-                    required
-                    disabled={isLoading}
-                    className="w-full px-5 py-4 bg-black border border-slate-800 rounded-2xl text-white font-bold focus:ring-2 focus:ring-red-600 focus:outline-none transition-all placeholder:text-slate-800"
-                    placeholder="Enter your name"
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                  />
-                </div>
-                {!isLogin && (
-                  <div>
-                    <label className="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em] block mb-2 ml-1">Email Address</label>
-                    <input
-                      type="email"
-                      required
-                      disabled={isLoading}
-                      className="w-full px-5 py-4 bg-black border border-slate-800 rounded-2xl text-white font-bold focus:ring-2 focus:ring-red-600 focus:outline-none transition-all placeholder:text-slate-800"
-                      placeholder="Enter your email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                    />
-                  </div>
-                )}
-                <div>
-                  <label className="text-[10px] font-black text-slate-600 uppercase tracking-[0.2em] block mb-2 ml-1">Password</label>
-                  <input
-                    type="password"
-                    required
-                    disabled={isLoading}
-                    className="w-full px-5 py-4 bg-black border border-slate-800 rounded-2xl text-white font-bold focus:ring-2 focus:ring-red-600 focus:outline-none transition-all placeholder:text-slate-800"
-                    placeholder="••••••••"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                  />
-                </div>
-              </div>
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="w-full py-6 bg-red-600 hover:bg-red-500 text-white font-black uppercase tracking-[0.4em] text-[11px] rounded-[1.5rem] transition-all shadow-[0_20px_40px_rgba(220,38,38,0.3)] active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3 group"
+          >
+            {isLoading ? (
+              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+            ) : (
+              <>
+                {isLogin ? 'Authenticate' : 'Initiate Session'}
+                <i className="fa-solid fa-arrow-right text-[10px] group-hover:translate-x-1 transition-transform"></i>
+              </>
+            )}
+          </button>
+        </form>
 
-              <button
-                type="submit"
-                disabled={isLoading}
-                className="w-full py-5 bg-red-600 hover:bg-red-700 text-white font-black uppercase tracking-[0.2em] rounded-2xl transition-all shadow-xl active:scale-95 mt-6 disabled:opacity-50"
-              >
-                {isLoading ? 'Please Wait...' : isLogin ? 'Sign In' : 'Create Account'}
-              </button>
-            </form>
-
-            <div className="text-center pt-4">
-              <button
-                onClick={() => setIsLogin(!isLogin)}
-                className="text-slate-600 hover:text-red-500 text-[10px] font-black uppercase tracking-[0.2em] transition-colors"
-              >
-                {isLogin ? "Need a new account? Sign Up" : "Already have an account? Sign In"}
-              </button>
-            </div>
-          </>
-        )}
+        <div className="text-center">
+          <button
+            onClick={() => setIsLogin(!isLogin)}
+            className="text-slate-600 hover:text-red-500 text-[10px] font-black uppercase tracking-[0.3em] transition-colors pb-2 border-b-2 border-transparent hover:border-red-600/30"
+          >
+            {isLogin ? "Need new credentials?" : "Return to authentication"}
+          </button>
+        </div>
       </div>
     </div>
   );

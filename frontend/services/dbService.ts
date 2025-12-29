@@ -2,19 +2,30 @@
 import { User, Task } from '../types';
 
 /**
- * DATA SERVICE (THE MESSENGER)
- * This file helps the app talk to your server to save your progress.
+ * DATA SERVICE
+ * Handles communication with the backend.
  */
-let API_BASE_URL = import.meta.env.VITE_API_BASE_URL; 
+// The base URL must be clean and not have redundant slashes
+let API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 
-// Set the link to your server
 export const setDatabaseUrl = (url: string) => {
-  API_BASE_URL = url.endsWith('/') ? url.slice(0, -1) : url;
+  if (!url) return;
+  // Remove trailing slashes and normalize /api suffix
+  let cleanUrl = url.replace(/\/+$/, "");
+  if (!cleanUrl.endsWith('/api')) {
+    API_BASE_URL = `${cleanUrl}/api`;
+  } else {
+    API_BASE_URL = cleanUrl;
+  }
 };
 
 export const getDatabaseUrl = () => API_BASE_URL;
 
-// Make the password secure before sending it
+const getLocalTodayStr = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+};
+
 async function hashPassword(password: string): Promise<string> {
   const msgUint8 = new TextEncoder().encode(password);
   const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
@@ -26,11 +37,10 @@ const fetchOptions = (method: string, body?: any): RequestInit => ({
   method,
   headers: { 'Content-Type': 'application/json' },
   body: body ? JSON.stringify(body) : undefined,
-  credentials: 'include' as RequestCredentials, // Critical for Render/Persistence
+  credentials: 'include',
 });
 
 export const dbService = {
-  // Check if the server is awake
   ping: async (): Promise<boolean> => {
     try {
       const response = await fetch(`${API_BASE_URL}/health`, { credentials: 'include' });
@@ -40,7 +50,6 @@ export const dbService = {
     }
   },
 
-  // Check login details
   authenticate: async (username: string, plainPassword: string): Promise<User | null> => {
     const hashedPassword = await hashPassword(plainPassword);
     try {
@@ -51,41 +60,76 @@ export const dbService = {
     }
   },
 
-  // Save a new account
-  saveUser: async (user: User, plainPassword?: string): Promise<User> => {
-    const payload: any = { ...user };
+  saveUser: async (user: User, plainPassword?: string, isUpdate = false): Promise<User> => {
+    if (isUpdate && !user.id) {
+      throw new Error("Cannot update user: Missing unique ID.");
+    }
+
+    // SANITIZATION: Remove MongoDB internals to avoid server-side immutable field errors
+    const { _id, __v, ...userData } = user as any;
+    const payload: any = { ...userData };
+    
     if (plainPassword) {
       payload.password = await hashPassword(plainPassword);
     }
-    const response = await fetch(`${API_BASE_URL}/users`, fetchOptions('POST', payload));
-    if (!response.ok) throw new Error('Could not save account');
-    return await response.json();
+    
+    // Build URL ensuring no double slashes before 'users'
+    const endpoint = isUpdate ? `/users/${encodeURIComponent(user.id)}` : `/users`;
+    const url = `${API_BASE_URL}${endpoint}`;
+    
+    try {
+      const response = await fetch(url, fetchOptions(isUpdate ? 'PUT' : 'POST', payload));
+      
+      if (!response.ok) {
+        let errorMsg = `API Error (${response.status})`;
+        try {
+          const errorData = await response.json();
+          errorMsg = errorData.error || errorMsg;
+        } catch (e) {
+          // Response was not JSON (likely a proxy 404)
+        }
+        throw new Error(errorMsg);
+      }
+      
+      return await response.json();
+    } catch (err: any) {
+      console.error("Networking Failure:", err);
+      throw new Error(err.message || 'Connection lost during data sync');
+    }
   },
 
-  // Get tasks for today
   getTodaysTasks: async (userId: string): Promise<Task[]> => {
-    const response = await fetch(`${API_BASE_URL}/tasks/today?userId=${userId}`, { credentials: 'include' });
-    return response.ok ? await response.json() : [];
+    const today = getLocalTodayStr();
+    try {
+      const response = await fetch(`${API_BASE_URL}/tasks/today?userId=${userId}&date=${today}`, { credentials: 'include' });
+      return response.ok ? await response.json() : [];
+    } catch {
+      return [];
+    }
   },
 
-  // Get everything ever saved
   getAllTasks: async (userId: string): Promise<Task[]> => {
-    const response = await fetch(`${API_BASE_URL}/tasks?userId=${userId}`, { credentials: 'include' });
-    return response.ok ? await response.json() : [];
+    try {
+      const response = await fetch(`${API_BASE_URL}/tasks?userId=${userId}`, { credentials: 'include' });
+      return response.ok ? await response.json() : [];
+    } catch {
+      return [];
+    }
   },
 
-  // Add or update a habit/task
   saveTask: async (task: Task): Promise<void> => {
-    await fetch(`${API_BASE_URL}/tasks`, fetchOptions('POST', task));
+    try {
+      await fetch(`${API_BASE_URL}/tasks`, fetchOptions('POST', task));
+    } catch (err) {
+      console.warn("Task cloud sync failed", err);
+    }
   },
 
-  // Delete something
   deleteTask: async (taskId: string, title?: string, isRecurring?: boolean): Promise<void> => {
     const query = isRecurring ? `?title=${encodeURIComponent(title || '')}&recurring=true` : `/${taskId}`;
     await fetch(`${API_BASE_URL}/tasks${query}`, { method: 'DELETE', credentials: 'include' });
   },
 
-  // Check if you are still logged in
   getSession: async (): Promise<User | null> => {
     try {
       const response = await fetch(`${API_BASE_URL}/session`, { credentials: 'include' });
@@ -95,16 +139,18 @@ export const dbService = {
     }
   },
 
-  // Sign out
   setSession: async (user: User | null): Promise<void> => {
     if (!user) {
       await fetch(`${API_BASE_URL}/logout`, fetchOptions('POST'));
     }
   },
 
-  // Get list of existing names
   getUsers: async (): Promise<User[]> => {
-    const response = await fetch(`${API_BASE_URL}/users/check`, { credentials: 'include' });
-    return response.ok ? await response.json() : [];
+    try {
+      const response = await fetch(`${API_BASE_URL}/users/check`, { credentials: 'include' });
+      return response.ok ? await response.json() : [];
+    } catch {
+      return [];
+    }
   }
 };
