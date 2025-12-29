@@ -74,7 +74,7 @@ const AuthPage: React.FC<AuthPageProps> = ({ onLogin }) => {
         <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] bg-red-900/10 blur-[120px] rounded-full"></div>
       </div>
 
-      <div className="max-w-md w-full space-y-8 bg-[#0a0a0a] p-10 rounded-[40px] border border-white/5 shadow-2xl relative z-10 overflow-hidden">
+      {/* <div className="max-w-md w-full space-y-8 bg-[#0a0a0a] p-10 rounded-[40px] border border-white/5 shadow-2xl relative z-10 overflow-hidden">
         {/* Connection toggle */}
         <button 
           onClick={() => setShowDbLink(!showDbLink)}
@@ -86,8 +86,8 @@ const AuthPage: React.FC<AuthPageProps> = ({ onLogin }) => {
 
         {showDbLink ? (
           <div className="py-4 animate-in fade-in zoom-in-95 duration-300">
-            <h3 className="text-xl font-black italic uppercase tracking-tighter mb-2">Data Connection</h3>
-            <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-8">Where we save your habits</p>
+            {/* <h3 className="text-xl font-black italic uppercase tracking-tighter mb-2">Data Connection</h3> */}
+            {/* <p className="text-slate-500 text-xs font-bold uppercase tracking-widest mb-8">Where we save your habits</p> */}
             
             <div className="space-y-6">
               <div>
@@ -109,7 +109,7 @@ const AuthPage: React.FC<AuthPageProps> = ({ onLogin }) => {
                 }`}
               >
                 {connectionStatus === 'testing' ? 'Checking...' : connectionStatus === 'idle' ? 'Link & Test' : connectionStatus === 'connected' ? 'Connected!' : 'Connection Failed'}
-              </button>
+              </button> */}
 
               <button 
                 onClick={() => setShowDbLink(false)}
