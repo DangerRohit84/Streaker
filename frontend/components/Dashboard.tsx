@@ -40,6 +40,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     let streakCount = 0;
     
     const todayTasks = tasksByDate[today] || [];
+    // Only count as perfect if tasks exist and are all done
     const isTodayPerfect = todayTasks.length > 0 && todayTasks.every(t => t.completed);
     
     if (isTodayPerfect) {
@@ -61,6 +62,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       } else break;
     }
 
+    // If today isn't perfect, we show the streak up to yesterday
     if (!isTodayPerfect && streakCount === 0) {
       let pendingStreak = 0;
       let pDate = new Date();
@@ -98,10 +100,45 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const todaysTasks = await dbService.getTodaysTasks(user.id);
       const history = await dbService.getAllTasks(user.id);
-      setTasks(todaysTasks);
+      const today = getTodayStr();
+      
+      // Synthesize today's task list:
+      // 1. All tasks actually created for today
+      // 2. All unique recurring tasks from the past that don't have an entry for today yet
+      const todaysInstances = history.filter(t => t.date === today);
+      
+      // Get all recurring tasks (parents)
+      const recurringTemplates = history.filter(t => t.isRecurring);
+      
+      // Create a map of existing ritual titles for today to avoid duplicates
+      const existingTitles = new Set(todaysInstances.map(t => t.title));
+      
+      const missingRituals: Task[] = [];
+      // Use a map to find the latest version of each unique recurring title
+      const uniqueRecurringSources = new Map<string, Task>();
+      recurringTemplates.forEach(t => {
+        if (!uniqueRecurringSources.has(t.title) || t.date > uniqueRecurringSources.get(t.title)!.date) {
+          uniqueRecurringSources.set(t.title, t);
+        }
+      });
+
+      uniqueRecurringSources.forEach((template, title) => {
+        if (!existingTitles.has(title) && template.date < today) {
+          missingRituals.push({
+            ...template,
+            id: `virtual-${template.id}-${today}`, // Virtual ID until toggled
+            date: today,
+            completed: false
+          });
+        }
+      });
+
+      const finalTodaysTasks = [...todaysInstances, ...missingRituals];
+      
+      setTasks(finalTodaysTasks);
       setAllHistoryTasks(history);
+
       const actualStreak = calculateStreakFromHistory(history);
       syncStreakToCloud(actualStreak);
     } catch (err) {
@@ -178,13 +215,35 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   };
 
   const toggleTask = async (taskId: string) => {
-    const updatedTasks = tasks.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t);
-    setTasks(updatedTasks);
-    const targetTask = updatedTasks.find(t => t.id === taskId);
-    if (targetTask) await dbService.saveTask(targetTask);
-    const updatedHistory = allHistoryTasks.map(t => t.id === taskId ? { ...t, completed: !t.completed } : t);
-    setAllHistoryTasks(updatedHistory);
-    const calculatedStreak = calculateStreakFromHistory(updatedHistory);
+    const today = getTodayStr();
+    let targetTask = tasks.find(t => t.id === taskId);
+    if (!targetTask) return;
+
+    let updatedTask = { ...targetTask, completed: !targetTask.completed };
+    
+    // If this was a "virtual" ritual (not yet saved for today), give it a real ID and save it
+    if (taskId.startsWith('virtual-')) {
+      updatedTask.id = crypto.randomUUID();
+    }
+
+    // Update local UI state
+    const newTodaysTasks = tasks.map(t => t.id === taskId ? updatedTask : t);
+    setTasks(newTodaysTasks);
+    
+    // Save to DB
+    await dbService.saveTask(updatedTask);
+    
+    // Update total history
+    let newHistory;
+    if (taskId.startsWith('virtual-')) {
+      newHistory = [...allHistoryTasks, updatedTask];
+    } else {
+      newHistory = allHistoryTasks.map(t => t.id === taskId ? updatedTask : t);
+    }
+    setAllHistoryTasks(newHistory);
+
+    // Re-calculate streak
+    const calculatedStreak = calculateStreakFromHistory(newHistory);
     if (calculatedStreak !== user.streakCount) {
       syncStreakToCloud(calculatedStreak);
       if (calculatedStreak > user.streakCount) triggerToast("Persistence Validated ⚡");
@@ -193,11 +252,16 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   };
 
   const deleteTask = async (task: Task) => {
-    await dbService.deleteTask(task.id, task.title, task.isRecurring);
+    // If it's virtual, we just filter it out locally (it doesn't exist in DB yet)
+    if (!task.id.startsWith('virtual-')) {
+      await dbService.deleteTask(task.id, task.title, task.isRecurring);
+    }
+    
     const remainingTasks = tasks.filter(t => t.id !== task.id);
     const remainingHistory = allHistoryTasks.filter(t => t.id !== task.id);
     setTasks(remainingTasks);
     setAllHistoryTasks(remainingHistory);
+
     const newCount = calculateStreakFromHistory(remainingHistory);
     syncStreakToCloud(newCount);
     triggerToast("Archive Modified");
@@ -331,7 +395,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                   <div className={`w-6 h-6 md:w-8 md:h-8 rounded-lg md:rounded-xl border-2 flex items-center justify-center transition-all ${isNewTaskRepeating ? 'bg-red-600 border-red-600' : 'border-slate-800 group-hover:border-slate-600'}`}>
                     {isNewTaskRepeating && <i className="fa-solid fa-repeat text-[10px] md:text-[12px]"></i>}
                   </div>
-                  <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest text-slate-500 group-hover:text-slate-300 transition-colors">Daily sequence mode</span>
+                  <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest text-slate-500 group-hover:text-slate-300 transition-colors">Daily ritual mode</span>
                 </label>
               </form>
 
@@ -343,12 +407,16 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                     </button>
                     <div className="flex-1 min-w-0">
                       <p className={`text-lg md:text-xl font-black truncate transition-all duration-500 ${task.completed ? 'line-through text-slate-700 italic' : 'text-slate-100'}`}>{task.title}</p>
-                      {task.reminderTime && (
-                        <span className="text-[7px] md:text-[9px] font-black uppercase tracking-widest text-slate-600 mt-1 flex items-center gap-2">
-                          <i className="fa-regular fa-clock"></i> {task.reminderTime}
-                          {task.isRecurring && <span className="text-red-900">• DAILY</span>}
-                        </span>
-                      )}
+                      <div className="flex items-center gap-3 mt-1">
+                        {task.isRecurring && (
+                          <span className="text-[7px] md:text-[8px] font-black uppercase tracking-[0.2em] bg-red-600/10 text-red-500 px-2 py-0.5 rounded-md border border-red-600/20">Ritual</span>
+                        )}
+                        {task.reminderTime && (
+                          <span className="text-[7px] md:text-[9px] font-black uppercase tracking-widest text-slate-600 flex items-center gap-2">
+                            <i className="fa-regular fa-clock"></i> {task.reminderTime}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <button onClick={() => deleteTask(task)} className="text-slate-800 hover:text-red-500 p-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all flex-shrink-0">
                       <i className="fa-solid fa-trash-can md:text-lg"></i>
