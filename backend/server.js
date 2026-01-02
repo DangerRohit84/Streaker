@@ -22,15 +22,17 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Request logger for diagnostic purposes
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} [${req.method}] ${req.url}`);
-  next();
-});
-
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ Database Integrated'))
-  .catch(err => console.error('❌ Connection Failed:', err));
+// Database connection with retry logic
+const connectDB = async () => {
+  try {
+    await mongoose.connect(MONGODB_URI);
+    console.log('✅ Database Integrated');
+  } catch (err) {
+    console.error('❌ Connection Failed:', err);
+    setTimeout(connectDB, 5000);
+  }
+};
+connectDB();
 
 app.use(session({
   name: 'streakflow_sid',
@@ -50,47 +52,37 @@ app.use(session({
   }
 }));
 
+// Error handling wrapper
+const asyncHandler = fn => (req, res, next) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
+
 /**
  * DIRECT API ROUTES
  */
 
-app.get('/api/health', (req, res) => res.sendStatus(200));
+app.get('/api/health', (req, res) => res.status(200).send('OK'));
 
-app.get('/api/session', async (req, res) => {
+app.get('/api/session', asyncHandler(async (req, res) => {
   if (req.session && req.session.userId) {
-    try {
-      const user = await User.findOne({ id: req.session.userId });
-      if (user) return res.json(user);
-    } catch (e) {
-      return res.status(500).json({ error: 'Session lookup failed' });
-    }
+    const user = await User.findOne({ id: req.session.userId });
+    if (user) return res.json(user);
   }
   res.status(401).json({ error: 'Unauthorized' });
-});
+}));
 
-app.get('/api/users/check', async (req, res) => {
-  try {
-    const users = await User.find({}, 'username');
-    res.json(users);
-  } catch (err) {
-    res.status(500).json({ error: 'Fetch failed' });
-  }
-});
+app.get('/api/users/check', asyncHandler(async (req, res) => {
+  const users = await User.find({}, 'username');
+  res.json(users);
+}));
 
-// ADMIN ONLY: Get all users with full detail
-app.get('/api/admin/users', async (req, res) => {
-  try {
-    // Basic protection: check if session user exists. In a production app, we'd verify the role here.
-    if (!req.session.userId) return res.status(403).json({ error: 'Forbidden' });
-    
-    const users = await User.find({}).sort({ streakCount: -1 });
-    res.json(users);
-  } catch (err) {
-    res.status(500).json({ error: 'Admin fetch failed' });
-  }
-});
+app.get('/api/admin/users', asyncHandler(async (req, res) => {
+  if (!req.session.userId) return res.status(403).json({ error: 'Forbidden' });
+  const users = await User.find({}).sort({ streakCount: -1 });
+  res.json(users);
+}));
 
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', asyncHandler(async (req, res) => {
   const { username, password } = req.body;
   const user = await User.findOne({ username, password });
   if (user) {
@@ -102,59 +94,48 @@ app.post('/api/login', async (req, res) => {
   } else {
     res.status(401).json({ error: 'Invalid credentials' });
   }
-});
+}));
 
-app.post('/api/users', async (req, res) => {
-  try {
-    const newUser = new User(req.body);
-    // Grant admin to the very first user automatically or a specific name for testing
-    const count = await User.countDocuments();
-    if (count === 0) newUser.role = 'admin';
-    
-    await newUser.save();
-    req.session.userId = newUser.id;
-    req.session.save((err) => {
-      if (err) return res.status(500).json({ error: 'Session save failed' });
-      res.json(newUser);
-    });
-  } catch (err) {
-    if (err.code === 11000) {
-      return res.status(400).json({ error: 'That name is already used' });
-    }
-    res.status(400).json({ error: 'Registration failed' });
-  }
-});
+app.post('/api/users', asyncHandler(async (req, res) => {
+  const newUser = new User(req.body);
+  const count = await User.countDocuments();
+  if (count === 0) newUser.role = 'admin';
+  
+  await newUser.save();
+  req.session.userId = newUser.id;
+  req.session.save((err) => {
+    if (err) return res.status(500).json({ error: 'Session save failed' });
+    res.json(newUser);
+  });
+}));
 
-app.put('/api/users/:id', async (req, res) => {
+app.put('/api/users/:id', asyncHandler(async (req, res) => {
   const userId = req.params.id;
-  try {
-    const { password, _id, __v, id, ...updateData } = req.body;
-    const updatedUser = await User.findOneAndUpdate(
-      { id: userId },
-      { $set: updateData },
-      { new: true, runValidators: true }
-    );
-    if (!updatedUser) return res.status(404).json({ error: 'User not found' });
-    res.json(updatedUser);
-  } catch (err) {
-    res.status(500).json({ error: 'Update failure' });
-  }
-});
+  const { password, _id, __v, id, ...updateData } = req.body;
+  const updatedUser = await User.findOneAndUpdate(
+    { id: userId },
+    { $set: updateData },
+    { new: true, runValidators: true }
+  );
+  if (!updatedUser) return res.status(404).json({ error: 'User not found' });
+  res.json(updatedUser);
+}));
 
-app.get('/api/tasks/today', async (req, res) => {
+app.get('/api/tasks/today', asyncHandler(async (req, res) => {
   const { userId, date } = req.query;
   const targetDate = date || new Date().toISOString().split('T')[0];
   const tasks = await Task.find({ userId, date: targetDate });
   res.json(tasks);
-});
+}));
 
-app.get('/api/tasks', async (req, res) => {
+app.get('/api/tasks', asyncHandler(async (req, res) => {
   const { userId } = req.query;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
   const tasks = await Task.find({ userId });
   res.json(tasks);
-});
+}));
 
-app.post('/api/tasks', async (req, res) => {
+app.post('/api/tasks', asyncHandler(async (req, res) => {
   const data = req.body;
   const task = await Task.findOneAndUpdate(
     { id: data.id },
@@ -162,20 +143,20 @@ app.post('/api/tasks', async (req, res) => {
     { upsert: true, new: true }
   );
   res.json(task);
-});
+}));
 
-app.delete('/api/tasks/:id', async (req, res) => {
+app.delete('/api/tasks/:id', asyncHandler(async (req, res) => {
   await Task.deleteOne({ id: req.params.id });
   res.sendStatus(200);
-});
+}));
 
-app.delete('/api/tasks', async (req, res) => {
+app.delete('/api/tasks', asyncHandler(async (req, res) => {
   const { title, recurring } = req.query;
   if (recurring === 'true') {
     await Task.deleteMany({ title, isRecurring: true });
   }
   res.sendStatus(200);
-});
+}));
 
 app.post('/api/logout', (req, res) => {
   req.session.destroy();
@@ -183,8 +164,13 @@ app.post('/api/logout', (req, res) => {
   res.sendStatus(200);
 });
 
-app.use((req, res) => {
-  res.status(404).json({ error: 'Undefined endpoint' });
+// Global Error Handler
+app.use((err, req, res, next) => {
+  console.error('🔥 Server Error:', err.stack);
+  res.status(err.status || 500).json({
+    error: err.message || 'Internal Server Error',
+    instance_failed: true
+  });
 });
 
 app.listen(PORT, () => console.log(`🚀 persistence-api-node online on port ${PORT}`));
