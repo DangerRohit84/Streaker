@@ -21,17 +21,17 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   const [toast, setToast] = useState<{ message: string; visible: boolean }>({ message: '', visible: false });
   const [currentMonth, setCurrentMonth] = useState(new Date());
 
-  const getTodayStr = () => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  };
+  const getTodayStr = () => new Date().toISOString().split('T')[0];
 
   /**
    * REFINED HISTORICAL STREAK LOGIC
    */
   const calculateStreakFromHistory = useCallback((history: Task[]) => {
+    if (history.length === 0) return 0;
+    
     const tasksByDate: Record<string, Task[]> = {};
     history.forEach(t => {
+      if (!t.date) return;
       if (!tasksByDate[t.date]) tasksByDate[t.date] = [];
       tasksByDate[t.date].push(t);
     });
@@ -40,7 +40,6 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     let streakCount = 0;
     
     const todayTasks = tasksByDate[today] || [];
-    // Only count as perfect if tasks exist and are all done
     const isTodayPerfect = todayTasks.length > 0 && todayTasks.every(t => t.completed);
     
     if (isTodayPerfect) {
@@ -49,37 +48,49 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
     let checkDate = new Date();
     checkDate.setDate(checkDate.getDate() - 1);
+    
+    // Safety exit: Don't check further back than the user's join date or a reasonable limit
+    const joinDateStr = user.joinDate.split('T')[0];
+    let safetyCounter = 0;
 
-    while (true) {
-      const dStr = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
+    while (safetyCounter < 2000) { // Max 2000 days streak support
+      const dStr = checkDate.toISOString().split('T')[0];
       const dayTasks = tasksByDate[dStr] || [];
       
       if (dayTasks.length > 0) {
         if (dayTasks.every(t => t.completed)) {
           streakCount++;
           checkDate.setDate(checkDate.getDate() - 1);
+          safetyCounter++;
         } else break;
-      } else break;
+      } else {
+        // Only break if we've passed the join date (handles gaps if user joined recently)
+        if (dStr <= joinDateStr) break;
+        // If there are no tasks for a day, the streak is broken
+        break;
+      }
     }
 
-    // If today isn't perfect, we show the streak up to yesterday
+    // If today isn't perfect, return the streak ending yesterday
     if (!isTodayPerfect && streakCount === 0) {
       let pendingStreak = 0;
       let pDate = new Date();
       pDate.setDate(pDate.getDate() - 1);
-      while (true) {
-        const dStr = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}-${String(pDate.getDate()).padStart(2, '0')}`;
+      let pSafety = 0;
+      while (pSafety < 2000) {
+        const dStr = pDate.toISOString().split('T')[0];
         const dayTasks = tasksByDate[dStr] || [];
         if (dayTasks.length > 0 && dayTasks.every(t => t.completed)) {
           pendingStreak++;
           pDate.setDate(pDate.getDate() - 1);
+          pSafety++;
         } else break;
       }
       return pendingStreak;
     }
 
     return streakCount;
-  }, []);
+  }, [user.joinDate]);
 
   const syncStreakToCloud = useCallback(async (newCount: number) => {
     if (newCount !== user.streakCount) {
@@ -103,19 +114,11 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       const history = await dbService.getAllTasks(user.id);
       const today = getTodayStr();
       
-      // Synthesize today's task list:
-      // 1. All tasks actually created for today
-      // 2. All unique recurring tasks from the past that don't have an entry for today yet
       const todaysInstances = history.filter(t => t.date === today);
-      
-      // Get all recurring tasks (parents)
       const recurringTemplates = history.filter(t => t.isRecurring);
-      
-      // Create a map of existing ritual titles for today to avoid duplicates
       const existingTitles = new Set(todaysInstances.map(t => t.title));
       
       const missingRituals: Task[] = [];
-      // Use a map to find the latest version of each unique recurring title
       const uniqueRecurringSources = new Map<string, Task>();
       recurringTemplates.forEach(t => {
         if (!uniqueRecurringSources.has(t.title) || t.date > uniqueRecurringSources.get(t.title)!.date) {
@@ -127,7 +130,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
         if (!existingTitles.has(title) && template.date < today) {
           missingRituals.push({
             ...template,
-            id: `virtual-${template.id}-${today}`, // Virtual ID until toggled
+            id: `virtual-${template.id}`, // Unique enough for local ID
             date: today,
             completed: false
           });
@@ -135,7 +138,6 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       });
 
       const finalTodaysTasks = [...todaysInstances, ...missingRituals];
-      
       setTasks(finalTodaysTasks);
       setAllHistoryTasks(history);
 
@@ -143,6 +145,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       syncStreakToCloud(actualStreak);
     } catch (err) {
       console.error("Load failed", err);
+      triggerToast("Network Synchronization Failed");
     } finally {
       setIsLoading(false);
     }
@@ -199,9 +202,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
     try {
       await dbService.saveTask(newTask);
-      const updatedTasks = [...tasks, newTask];
       const updatedHistory = [...allHistoryTasks, newTask];
-      setTasks(updatedTasks);
+      setTasks(prev => [...prev, newTask]);
       setAllHistoryTasks(updatedHistory);
       const newCount = calculateStreakFromHistory(updatedHistory);
       syncStreakToCloud(newCount);
@@ -220,51 +222,57 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     if (!targetTask) return;
 
     let updatedTask = { ...targetTask, completed: !targetTask.completed };
+    const isVirtual = taskId.startsWith('virtual-');
     
-    // If this was a "virtual" ritual (not yet saved for today), give it a real ID and save it
-    if (taskId.startsWith('virtual-')) {
+    if (isVirtual) {
       updatedTask.id = crypto.randomUUID();
     }
 
-    // Update local UI state
-    const newTodaysTasks = tasks.map(t => t.id === taskId ? updatedTask : t);
-    setTasks(newTodaysTasks);
+    // Update local UI state immediately for responsiveness
+    setTasks(prev => prev.map(t => t.id === taskId ? updatedTask : t));
     
-    // Save to DB
-    await dbService.saveTask(updatedTask);
-    
-    // Update total history
-    let newHistory;
-    if (taskId.startsWith('virtual-')) {
-      newHistory = [...allHistoryTasks, updatedTask];
-    } else {
-      newHistory = allHistoryTasks.map(t => t.id === taskId ? updatedTask : t);
-    }
-    setAllHistoryTasks(newHistory);
+    try {
+      await dbService.saveTask(updatedTask);
+      
+      let newHistory;
+      if (isVirtual) {
+        newHistory = [...allHistoryTasks, updatedTask];
+      } else {
+        newHistory = allHistoryTasks.map(t => t.id === taskId ? updatedTask : t);
+      }
+      setAllHistoryTasks(newHistory);
 
-    // Re-calculate streak
-    const calculatedStreak = calculateStreakFromHistory(newHistory);
-    if (calculatedStreak !== user.streakCount) {
-      syncStreakToCloud(calculatedStreak);
-      if (calculatedStreak > user.streakCount) triggerToast("Persistence Validated ⚡");
-      else if (calculatedStreak === 0 && user.streakCount > 0) triggerToast("Sequence Broken ❄️");
+      const calculatedStreak = calculateStreakFromHistory(newHistory);
+      if (calculatedStreak !== user.streakCount) {
+        syncStreakToCloud(calculatedStreak);
+        if (calculatedStreak > user.streakCount) triggerToast("Persistence Validated ⚡");
+        else if (calculatedStreak === 0 && user.streakCount > 0) triggerToast("Sequence Broken ❄️");
+      }
+    } catch (err) {
+      triggerToast("Data Persistence Failure");
+      // Rollback on failure
+      setTasks(prev => prev.map(t => t.id === updatedTask.id ? targetTask! : t));
     }
   };
 
   const deleteTask = async (task: Task) => {
-    // If it's virtual, we just filter it out locally (it doesn't exist in DB yet)
-    if (!task.id.startsWith('virtual-')) {
-      await dbService.deleteTask(task.id, task.title, task.isRecurring);
-    }
-    
-    const remainingTasks = tasks.filter(t => t.id !== task.id);
-    const remainingHistory = allHistoryTasks.filter(t => t.id !== task.id);
-    setTasks(remainingTasks);
-    setAllHistoryTasks(remainingHistory);
+    try {
+      if (!task.id.startsWith('virtual-')) {
+        await dbService.deleteTask(task.id, task.title, task.isRecurring);
+      }
+      
+      const remainingTasks = tasks.filter(t => t.id !== task.id);
+      const remainingHistory = allHistoryTasks.filter(t => t.id !== (task.id.startsWith('virtual-') ? task.id : task.id));
+      
+      setTasks(remainingTasks);
+      setAllHistoryTasks(remainingHistory);
 
-    const newCount = calculateStreakFromHistory(remainingHistory);
-    syncStreakToCloud(newCount);
-    triggerToast("Archive Modified");
+      const newCount = calculateStreakFromHistory(remainingHistory);
+      syncStreakToCloud(newCount);
+      triggerToast("Archive Modified");
+    } catch (err) {
+      triggerToast("Archive Modification Failed");
+    }
   };
 
   const calendarDays = useMemo(() => {
@@ -279,7 +287,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   }, [currentMonth]);
 
   const getDayStatus = (date: Date) => {
-    const dStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const dStr = date.toISOString().split('T')[0];
     const dayTasks = allHistoryTasks.filter(t => t.date === dStr);
     if (dayTasks.length === 0) return 'none';
     return dayTasks.every(t => t.completed) ? 'complete' : 'partial';
@@ -295,7 +303,10 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     return (
       <div className="min-h-screen bg-[#020202] flex flex-col items-center justify-center gap-6 px-4">
         <div className="w-12 h-12 md:w-16 md:h-16 border-b-2 border-red-600 rounded-full animate-spin"></div>
-        <p className="text-red-600 font-black uppercase tracking-[0.4em] text-[8px] md:text-[10px] animate-pulse text-center">Establishing Node Connection</p>
+        <div className="space-y-2 text-center">
+          <p className="text-red-600 font-black uppercase tracking-[0.4em] text-[8px] md:text-[10px] animate-pulse">Syncing Ritual Sequence</p>
+          <p className="text-slate-800 font-bold uppercase text-[6px] tracking-widest">Validating Persistence Node</p>
+        </div>
       </div>
     );
   }
