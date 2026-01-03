@@ -10,9 +10,9 @@ const User = require('./models/User');
 const Task = require('./models/Task');
 
 const app = express();
-const PORT = process.env.PORT;
+const PORT = process.env.PORT ;
 
-const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_URI = process.env.MONGODB_URI ;
 
 app.set('trust proxy', 1);
 
@@ -22,13 +22,13 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Database connection
+// Database connection with increased timeout for production stability
 const connectDB = async () => {
   try {
     await mongoose.connect(MONGODB_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 15000,
+      serverSelectionTimeoutMS: 20000,
     });
     console.log('✅ StrikeFlow Persistent Link Active');
   } catch (err) {
@@ -39,7 +39,7 @@ const connectDB = async () => {
 connectDB();
 
 app.use(session({
-  name: 'strikeflow_v5_sid',
+  name: 'strikeflow_v6_sid',
   secret: process.env.SESSION_SECRET || 'strikeflow-high-entropy-persistence-key',
   resave: false,
   saveUninitialized: false,
@@ -61,7 +61,7 @@ const asyncHandler = fn => (req, res, next) => {
 };
 
 /**
- * STRIKEFLOW PERSISTENCE API V5
+ * STRIKEFLOW PERSISTENCE API V6
  */
 
 app.get('/api/health', (req, res) => res.status(200).send('OPTIMAL'));
@@ -114,12 +114,13 @@ app.put('/api/users/:id', asyncHandler(async (req, res) => {
 app.get('/api/tasks', asyncHandler(async (req, res) => {
   const { userId } = req.query;
   if (!userId) return res.status(400).json({ error: 'USER_ID_REQUIRED' });
-  const tasks = await Task.find({ userId });
+  const tasks = await Task.find({ userId }).sort({ date: -1 });
   res.json(tasks);
 }));
 
 app.post('/api/tasks', asyncHandler(async (req, res) => {
   const data = req.body;
+  // Upsert ensures we update the existing record for that specific date or create it
   const task = await Task.findOneAndUpdate(
     { id: data.id },
     data,
@@ -136,6 +137,7 @@ app.delete('/api/tasks/:id', asyncHandler(async (req, res) => {
 app.delete('/api/tasks', asyncHandler(async (req, res) => {
   const { title, recurring } = req.query;
   if (recurring === 'true') {
+    // When deleting a recurring task, we delete all instances with that title
     await Task.deleteMany({ title, isRecurring: true });
   }
   res.sendStatus(200);
@@ -143,7 +145,7 @@ app.delete('/api/tasks', asyncHandler(async (req, res) => {
 
 app.post('/api/logout', (req, res) => {
   req.session.destroy();
-  res.clearCookie('strikeflow_v5_sid', { secure: true, sameSite: 'none' });
+  res.clearCookie('strikeflow_v6_sid', { secure: true, sameSite: 'none' });
   res.sendStatus(200);
 });
 
