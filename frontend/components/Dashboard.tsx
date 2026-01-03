@@ -21,13 +21,19 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   const [toast, setToast] = useState<{ message: string; visible: boolean }>({ message: '', visible: false });
   const [currentMonth, setCurrentMonth] = useState(new Date());
 
-  const getTodayStr = () => new Date().toISOString().split('T')[0];
+  // Robust Local Date Format (YYYY-MM-DD)
+  const getLocalDateStr = useCallback((date: Date = new Date()) => {
+    // en-CA is YYYY-MM-DD
+    return date.toLocaleDateString('en-CA');
+  }, []);
 
   /**
-   * REFINED HISTORICAL STREAK LOGIC
+   * STREAK ENGINE 5.0
+   * A day is perfect if tasks exist and all are done.
+   * Streak counts consecutive perfect days ending today or yesterday.
    */
   const calculateStreakFromHistory = useCallback((history: Task[]) => {
-    if (history.length === 0) return 0;
+    if (!history || history.length === 0) return 0;
     
     const tasksByDate: Record<string, Task[]> = {};
     history.forEach(t => {
@@ -36,120 +42,112 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       tasksByDate[t.date].push(t);
     });
 
-    const today = getTodayStr();
+    const todayStr = getLocalDateStr();
+    const joinDateStr = user.joinDate.split('T')[0];
+
+    const isDayPerfect = (dateStr: string) => {
+      const dayTasks = tasksByDate[dateStr] || [];
+      if (dayTasks.length === 0) return false;
+      return dayTasks.every(t => t.completed);
+    };
+
     let streakCount = 0;
+    let checkDate = new Date();
     
-    const todayTasks = tasksByDate[today] || [];
-    const isTodayPerfect = todayTasks.length > 0 && todayTasks.every(t => t.completed);
+    // Safety break to prevent infinite loops (max 10 years)
+    let safety = 0;
     
-    if (isTodayPerfect) {
+    // We start from Today. If today is perfect, streak includes it.
+    // If today isn't perfect, we check if yesterday was perfect. 
+    // If yesterday wasn't perfect either, streak is 0.
+    
+    const todayIsPerfect = isDayPerfect(todayStr);
+    
+    if (todayIsPerfect) {
       streakCount = 1;
+      checkDate.setDate(checkDate.getDate() - 1);
+    } else {
+      // If today isn't finished, the streak depends on yesterday
+      checkDate.setDate(checkDate.getDate() - 1);
     }
 
-    let checkDate = new Date();
-    checkDate.setDate(checkDate.getDate() - 1);
-    
-    // Safety exit: Don't check further back than the user's join date or a reasonable limit
-    const joinDateStr = user.joinDate.split('T')[0];
-    let safetyCounter = 0;
-
-    while (safetyCounter < 2000) { // Max 2000 days streak support
-      const dStr = checkDate.toISOString().split('T')[0];
-      const dayTasks = tasksByDate[dStr] || [];
-      
-      if (dayTasks.length > 0) {
-        if (dayTasks.every(t => t.completed)) {
-          streakCount++;
-          checkDate.setDate(checkDate.getDate() - 1);
-          safetyCounter++;
-        } else break;
+    while (safety < 3650) {
+      const dStr = getLocalDateStr(checkDate);
+      if (isDayPerfect(dStr)) {
+        streakCount++;
+        checkDate.setDate(checkDate.getDate() - 1);
       } else {
-        // Only break if we've passed the join date (handles gaps if user joined recently)
-        if (dStr <= joinDateStr) break;
-        // If there are no tasks for a day, the streak is broken
+        // If the day is before join date, we stop. 
+        // If it's after join date and empty/imperfect, streak is broken.
+        if (dStr < joinDateStr) break;
         break;
       }
-    }
-
-    // If today isn't perfect, return the streak ending yesterday
-    if (!isTodayPerfect && streakCount === 0) {
-      let pendingStreak = 0;
-      let pDate = new Date();
-      pDate.setDate(pDate.getDate() - 1);
-      let pSafety = 0;
-      while (pSafety < 2000) {
-        const dStr = pDate.toISOString().split('T')[0];
-        const dayTasks = tasksByDate[dStr] || [];
-        if (dayTasks.length > 0 && dayTasks.every(t => t.completed)) {
-          pendingStreak++;
-          pDate.setDate(pDate.getDate() - 1);
-          pSafety++;
-        } else break;
-      }
-      return pendingStreak;
+      safety++;
     }
 
     return streakCount;
-  }, [user.joinDate]);
+  }, [user.joinDate, getLocalDateStr]);
 
   const syncStreakToCloud = useCallback(async (newCount: number) => {
     if (newCount !== user.streakCount) {
       const updatedUser = { 
         ...user, 
         streakCount: newCount,
-        lastCompletedDate: newCount > 0 ? getTodayStr() : user.lastCompletedDate
+        lastCompletedDate: newCount > 0 ? getLocalDateStr() : user.lastCompletedDate
       };
       onUpdateUser(updatedUser);
       try {
         await dbService.saveUser(updatedUser, undefined, true);
-      } catch (err: any) {
-        console.error("Cloud synchronization failed", err);
+      } catch (err) {
+        console.error("Cloud streak sync error");
       }
     }
-  }, [user, onUpdateUser]);
+  }, [user, onUpdateUser, getLocalDateStr]);
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
       const history = await dbService.getAllTasks(user.id);
-      const today = getTodayStr();
+      const today = getLocalDateStr();
       
-      const todaysInstances = history.filter(t => t.date === today);
-      const recurringTemplates = history.filter(t => t.isRecurring);
-      const existingTitles = new Set(todaysInstances.map(t => t.title));
+      const todaysActual = history.filter(t => t.date === today);
+      const recurringSources = history.filter(t => t.isRecurring);
       
-      const missingRituals: Task[] = [];
-      const uniqueRecurringSources = new Map<string, Task>();
-      recurringTemplates.forEach(t => {
-        if (!uniqueRecurringSources.has(t.title) || t.date > uniqueRecurringSources.get(t.title)!.date) {
-          uniqueRecurringSources.set(t.title, t);
+      // Get unique ritual templates (latest one per title)
+      const ritualMap = new Map<string, Task>();
+      recurringSources.forEach(t => {
+        if (!ritualMap.has(t.title) || t.date > ritualMap.get(t.title)!.date) {
+          ritualMap.set(t.title, t);
         }
       });
 
-      uniqueRecurringSources.forEach((template, title) => {
-        if (!existingTitles.has(title) && template.date < today) {
+      const existingTitles = new Set(todaysActual.map(t => t.title));
+      const missingRituals: Task[] = [];
+      
+      ritualMap.forEach((template, title) => {
+        if (!existingTitles.has(title)) {
+          // IMPORTANT: Explicitly set completed to FALSE for the new day instance
           missingRituals.push({
             ...template,
-            id: `virtual-${template.id}`, // Unique enough for local ID
+            id: `virtual-${template.id}-${today}`,
             date: today,
-            completed: false
+            completed: false 
           });
         }
       });
 
-      const finalTodaysTasks = [...todaysInstances, ...missingRituals];
-      setTasks(finalTodaysTasks);
+      const combined = [...todaysActual, ...missingRituals];
+      setTasks(combined);
       setAllHistoryTasks(history);
 
-      const actualStreak = calculateStreakFromHistory(history);
-      syncStreakToCloud(actualStreak);
+      const count = calculateStreakFromHistory(history);
+      syncStreakToCloud(count);
     } catch (err) {
-      console.error("Load failed", err);
-      triggerToast("Network Synchronization Failed");
+      triggerToast("Sync Node Failed");
     } finally {
       setIsLoading(false);
     }
-  }, [user.id, calculateStreakFromHistory, syncStreakToCloud]);
+  }, [user.id, calculateStreakFromHistory, syncStreakToCloud, getLocalDateStr]);
 
   useEffect(() => {
     loadData();
@@ -160,26 +158,6 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       Notification.requestPermission();
     }
   }, []);
-
-  useEffect(() => {
-    const checkReminders = () => {
-      const now = new Date();
-      const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-      tasks.forEach(task => {
-        if (!task.completed && task.reminderTime === timeStr) {
-          if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification('StrikeFlow Ritual', {
-              body: `Current objective: ${task.title}`,
-              icon: 'https://cdn-icons-png.flaticon.com/512/785/785116.png',
-              tag: task.id
-            });
-          }
-        }
-      });
-    };
-    const interval = setInterval(checkReminders, 60000);
-    return () => clearInterval(interval);
-  }, [tasks]);
 
   const triggerToast = (msg: string) => {
     setToast({ message: msg, visible: true });
@@ -195,63 +173,57 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       userId: user.id,
       title: newTaskTitle,
       completed: false,
-      date: getTodayStr(),
+      date: getLocalDateStr(),
       isRecurring: isNewTaskRepeating,
       reminderTime: newTaskReminderTime || undefined
     };
 
     try {
       await dbService.saveTask(newTask);
-      const updatedHistory = [...allHistoryTasks, newTask];
+      const newHistory = [...allHistoryTasks, newTask];
       setTasks(prev => [...prev, newTask]);
-      setAllHistoryTasks(updatedHistory);
-      const newCount = calculateStreakFromHistory(updatedHistory);
+      setAllHistoryTasks(newHistory);
+      
+      const newCount = calculateStreakFromHistory(newHistory);
       syncStreakToCloud(newCount);
+      
       setNewTaskTitle('');
       setNewTaskReminderTime('');
       setIsNewTaskRepeating(false);
-      triggerToast("Ritual Established 🔥");
+      triggerToast("Initiated 🔥");
     } catch (err) {
-      triggerToast("System Sync Error");
+      triggerToast("Deployment Failed");
     }
   };
 
   const toggleTask = async (taskId: string) => {
-    const today = getTodayStr();
-    let targetTask = tasks.find(t => t.id === taskId);
-    if (!targetTask) return;
+    const target = tasks.find(t => t.id === taskId);
+    if (!target) return;
 
-    let updatedTask = { ...targetTask, completed: !targetTask.completed };
     const isVirtual = taskId.startsWith('virtual-');
+    let updated = { ...target, completed: !target.completed };
     
     if (isVirtual) {
-      updatedTask.id = crypto.randomUUID();
+      updated.id = crypto.randomUUID(); // Give it a real ID now
     }
 
-    // Update local UI state immediately for responsiveness
-    setTasks(prev => prev.map(t => t.id === taskId ? updatedTask : t));
+    setTasks(prev => prev.map(t => t.id === taskId ? updated : t));
     
     try {
-      await dbService.saveTask(updatedTask);
+      await dbService.saveTask(updated);
       
-      let newHistory;
-      if (isVirtual) {
-        newHistory = [...allHistoryTasks, updatedTask];
-      } else {
-        newHistory = allHistoryTasks.map(t => t.id === taskId ? updatedTask : t);
-      }
+      const newHistory = isVirtual 
+        ? [...allHistoryTasks, updated]
+        : allHistoryTasks.map(t => t.id === taskId ? updated : t);
+      
       setAllHistoryTasks(newHistory);
-
-      const calculatedStreak = calculateStreakFromHistory(newHistory);
-      if (calculatedStreak !== user.streakCount) {
-        syncStreakToCloud(calculatedStreak);
-        if (calculatedStreak > user.streakCount) triggerToast("Persistence Validated ⚡");
-        else if (calculatedStreak === 0 && user.streakCount > 0) triggerToast("Sequence Broken ❄️");
-      }
+      const newCount = calculateStreakFromHistory(newHistory);
+      syncStreakToCloud(newCount);
+      
+      if (updated.completed) triggerToast("Validated ⚡");
     } catch (err) {
-      triggerToast("Data Persistence Failure");
-      // Rollback on failure
-      setTasks(prev => prev.map(t => t.id === updatedTask.id ? targetTask! : t));
+      triggerToast("Sync Failed");
+      setTasks(prev => prev.map(t => t.id === updated.id ? target : t));
     }
   };
 
@@ -260,18 +232,15 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       if (!task.id.startsWith('virtual-')) {
         await dbService.deleteTask(task.id, task.title, task.isRecurring);
       }
-      
-      const remainingTasks = tasks.filter(t => t.id !== task.id);
-      const remainingHistory = allHistoryTasks.filter(t => t.id !== (task.id.startsWith('virtual-') ? task.id : task.id));
-      
-      setTasks(remainingTasks);
-      setAllHistoryTasks(remainingHistory);
-
-      const newCount = calculateStreakFromHistory(remainingHistory);
+      const remaining = tasks.filter(t => t.id !== task.id);
+      const remHistory = allHistoryTasks.filter(t => t.id !== task.id);
+      setTasks(remaining);
+      setAllHistoryTasks(remHistory);
+      const newCount = calculateStreakFromHistory(remHistory);
       syncStreakToCloud(newCount);
-      triggerToast("Archive Modified");
+      triggerToast("Purged");
     } catch (err) {
-      triggerToast("Archive Modification Failed");
+      triggerToast("Purge Failed");
     }
   };
 
@@ -287,13 +256,14 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   }, [currentMonth]);
 
   const getDayStatus = (date: Date) => {
-    const dStr = date.toISOString().split('T')[0];
+    const dStr = getLocalDateStr(date);
     const dayTasks = allHistoryTasks.filter(t => t.date === dStr);
     if (dayTasks.length === 0) return 'none';
     return dayTasks.every(t => t.completed) ? 'complete' : 'partial';
   };
 
   const doneCount = tasks.filter(t => t.completed).length;
+  const todayPerfect = tasks.length > 0 && doneCount === tasks.length;
 
   if (activeTab === 'admin') {
     return <AdminDashboard onBack={() => setActiveTab('today')} />;
@@ -301,12 +271,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-[#020202] flex flex-col items-center justify-center gap-6 px-4">
-        <div className="w-12 h-12 md:w-16 md:h-16 border-b-2 border-red-600 rounded-full animate-spin"></div>
-        <div className="space-y-2 text-center">
-          <p className="text-red-600 font-black uppercase tracking-[0.4em] text-[8px] md:text-[10px] animate-pulse">Syncing Ritual Sequence</p>
-          <p className="text-slate-800 font-bold uppercase text-[6px] tracking-widest">Validating Persistence Node</p>
-        </div>
+      <div className="min-h-screen bg-[#020202] flex items-center justify-center">
+        <div className="w-16 h-16 border-t-2 border-red-600 rounded-full animate-spin"></div>
       </div>
     );
   }
@@ -314,158 +280,139 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   return (
     <div className="min-h-screen bg-[#020202] text-white font-sans selection:bg-red-600/30 pb-10">
       <div className="fixed inset-0 pointer-events-none -z-10">
-        <div className="absolute top-[-10%] right-[-10%] w-[80%] md:w-[50%] h-[50%] bg-red-900/5 blur-[80px] md:blur-[120px] rounded-full"></div>
-        <div className="absolute bottom-[-10%] left-[-10%] w-[80%] md:w-[50%] h-[50%] bg-red-900/5 blur-[80px] md:blur-[120px] rounded-full"></div>
+        <div className="absolute top-[-10%] right-[-10%] w-[80%] h-[50%] bg-red-900/10 blur-[150px] rounded-full"></div>
+        <div className="absolute bottom-[-10%] left-[-10%] w-[80%] h-[50%] bg-red-900/10 blur-[150px] rounded-full"></div>
       </div>
 
-      <header className="max-w-7xl mx-auto px-4 sm:px-6 py-8 md:py-12 flex flex-col xl:flex-row items-center justify-between gap-8 md:gap-10">
-        <div className="flex items-center gap-4 md:gap-6 group self-start xl:self-center">
-          <div className="p-3 md:p-4 bg-red-600 rounded-2xl md:rounded-3xl shadow-[0_15px_40px_rgba(220,38,38,0.4)] transition-all group-hover:rotate-6 group-hover:scale-105">
-            <i className="fa-solid fa-fire text-2xl md:text-3xl"></i>
+      <header className="max-w-7xl mx-auto px-6 py-12 flex flex-col xl:flex-row items-center justify-between gap-10">
+        <div className="flex items-center gap-6 group">
+          <div className="p-5 bg-red-600 rounded-[2rem] shadow-[0_20px_50px_rgba(220,38,38,0.5)]">
+            <i className="fa-solid fa-fire-glow text-3xl"></i>
           </div>
           <div>
-            <h1 className="text-3xl md:text-4xl font-black italic uppercase tracking-tighter">StrikeFlow</h1>
-            <p className="text-slate-600 text-[8px] md:text-[10px] font-black uppercase tracking-[0.4em] mt-1">Daily Sequence Engine</p>
+            <h1 className="text-4xl md:text-5xl font-black italic uppercase tracking-tighter">StrikeFlow</h1>
+            <p className="text-slate-600 text-[10px] font-black uppercase tracking-[0.5em] mt-1">Persistence Module V5</p>
           </div>
         </div>
 
-        <nav className="flex flex-wrap items-center justify-center gap-2 bg-white/[0.03] backdrop-blur-2xl p-2 rounded-[1.5rem] md:rounded-[2rem] border border-white/5 shadow-xl w-full xl:w-auto">
+        <nav className="flex flex-wrap items-center justify-center gap-2 bg-white/[0.03] backdrop-blur-3xl p-2.5 rounded-[2.5rem] border border-white/5 shadow-2xl">
           {['today', 'progress', 'settings'].map(tab => (
             <button 
               key={tab}
               onClick={() => setActiveTab(tab as any)}
-              className={`flex-1 md:flex-none px-4 md:px-8 py-2.5 md:py-3.5 rounded-xl md:rounded-2xl text-[8px] md:text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === tab ? 'bg-red-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-200'}`}
+              className={`px-10 py-4 rounded-2xl text-[12px] font-black uppercase tracking-widest transition-all ${activeTab === tab ? 'bg-red-600 text-white shadow-xl' : 'text-slate-500 hover:text-slate-200'}`}
             >
               {tab}
             </button>
           ))}
           {user.role === 'admin' && (
-            <button 
-              onClick={() => setActiveTab('admin')}
-              className="flex-1 md:flex-none px-4 md:px-8 py-2.5 md:py-3.5 rounded-xl md:rounded-2xl text-[8px] md:text-[10px] font-black uppercase tracking-widest transition-all text-red-500 border border-red-500/20 hover:bg-red-500/10"
-            >
-              Command Center
-            </button>
+            <button onClick={() => setActiveTab('admin')} className="px-10 py-4 rounded-2xl text-[12px] font-black uppercase tracking-widest transition-all text-red-500 border border-red-500/20 hover:bg-red-500/10">Root</button>
           )}
-          <div className="hidden sm:block w-px h-6 bg-white/10 mx-2"></div>
-          <button onClick={onLogout} className="px-4 md:px-6 py-2.5 md:py-3.5 text-slate-700 hover:text-red-500 text-[8px] md:text-[10px] font-black uppercase tracking-widest transition-all">Sign Out</button>
+          <button onClick={onLogout} className="px-6 py-4 text-slate-700 hover:text-red-500 text-[12px] font-black uppercase tracking-widest transition-all">Exit</button>
         </nav>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6">
+      <main className="max-w-7xl mx-auto px-6">
         {activeTab === 'today' ? (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 md:gap-10">
-            {/* Stats Panel */}
-            <div className="lg:col-span-4 space-y-6 md:space-y-8 animate-in fade-in slide-in-from-left-5 duration-700">
-              <div className="bg-white/[0.03] p-8 md:p-12 rounded-[2.5rem] md:rounded-[3.5rem] border border-white/5 shadow-2xl text-center group relative overflow-hidden">
-                <div className="absolute inset-0 bg-gradient-to-br from-red-600/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700"></div>
-                <p className="text-slate-500 font-black text-[8px] md:text-[10px] uppercase tracking-[0.4em] md:tracking-[0.5em] mb-6 md:mb-10">Historical Sequence</p>
-                <div className="flex items-center justify-center gap-3 md:gap-4">
-                  <span className="text-7xl sm:text-8xl md:text-9xl lg:text-[140px] font-black leading-none tracking-tighter drop-shadow-2xl">{user.streakCount}</span>
-                  <div className="animate-bounce mt-auto pb-4">
-                    <i className="fa-solid fa-bolt text-red-500 text-2xl md:text-3xl"></i>
-                  </div>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
+            <div className="lg:col-span-4 space-y-8 animate-in fade-in slide-in-from-left-5">
+              <div className={`p-14 rounded-[4rem] border transition-all duration-700 text-center relative overflow-hidden group shadow-3xl ${todayPerfect ? 'bg-red-600/10 border-red-600 shadow-[0_0_80px_rgba(220,38,38,0.2)]' : 'bg-white/[0.03] border-white/5'}`}>
+                <p className="text-slate-500 font-black text-[12px] uppercase tracking-[0.5em] mb-10">Persistence Index</p>
+                <div className="flex items-center justify-center gap-4">
+                  <span className={`text-[120px] md:text-[160px] font-black leading-none tracking-tighter ${todayPerfect ? 'text-white' : 'text-slate-300'}`}>
+                    {user.streakCount}
+                  </span>
+                  <i className={`fa-solid fa-bolt text-4xl md:text-6xl ${todayPerfect ? 'text-red-500 animate-pulse' : 'text-slate-800'}`}></i>
                 </div>
-                <p className="mt-8 md:mt-10 text-red-500/50 text-[7px] md:text-[9px] font-black uppercase tracking-[0.3em] italic">Validated Record Index</p>
+                <p className={`mt-10 text-[11px] font-black uppercase tracking-[0.4em] italic ${todayPerfect ? 'text-red-500' : 'text-slate-700'}`}>
+                  {todayPerfect ? 'Sequence Validated' : 'Efficiency Pending'}
+                </p>
               </div>
 
-              <div className="bg-white/[0.03] p-6 md:p-10 rounded-[2rem] md:rounded-[3rem] border border-white/5 shadow-2xl">
-                 <div className="flex justify-between items-end mb-6 md:mb-8">
-                    <h3 className="text-4xl md:text-5xl font-black italic">{doneCount}<span className="text-slate-800 text-lg md:text-xl not-italic ml-2">/ {tasks.length}</span></h3>
-                    <span className="text-[8px] md:text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">{tasks.length > 0 ? Math.round((doneCount / tasks.length) * 100) : 0}%</span>
+              <div className="bg-white/[0.03] p-10 rounded-[3rem] border border-white/5 shadow-2xl">
+                 <div className="flex justify-between items-end mb-8">
+                    <h3 className="text-5xl font-black italic">{doneCount}<span className="text-slate-800 text-2xl not-italic ml-3">/ {tasks.length}</span></h3>
+                    <span className="text-[12px] font-black uppercase tracking-widest text-slate-500">{tasks.length > 0 ? Math.round((doneCount / tasks.length) * 100) : 0}%</span>
                  </div>
-                 <div className="h-3 md:h-4 bg-white/5 rounded-full overflow-hidden p-1 border border-white/5">
-                    <div className="h-full bg-red-600 rounded-full transition-all duration-700 shadow-[0_0_15px_rgba(220,38,38,0.5)]" style={{ width: `${tasks.length > 0 ? (doneCount / tasks.length) * 100 : 0}%` }}></div>
+                 <div className="h-4 bg-black/40 rounded-full overflow-hidden p-1 border border-white/5">
+                    <div className={`h-full rounded-full transition-all duration-1000 ${todayPerfect ? 'bg-white shadow-[0_0_20px_white]' : 'bg-red-600'}`} style={{ width: `${tasks.length > 0 ? (doneCount / tasks.length) * 100 : 0}%` }}></div>
                  </div>
               </div>
             </div>
 
-            {/* Task Area */}
-            <div className="lg:col-span-8 space-y-8 md:space-y-12 animate-in fade-in slide-in-from-right-5 duration-700">
-              <form onSubmit={addTask} className="bg-white/[0.02] p-6 md:p-10 rounded-[2.5rem] md:rounded-[4rem] border border-white/5 space-y-6 md:space-y-8 shadow-2xl backdrop-blur-md">
-                <div className="flex flex-col gap-4 md:gap-6">
+            <div className="lg:col-span-8 space-y-10 animate-in fade-in slide-in-from-right-10">
+              <form onSubmit={addTask} className="bg-white/[0.02] p-10 rounded-[4.5rem] border border-white/5 space-y-10 shadow-3xl backdrop-blur-3xl relative overflow-hidden group">
+                <div className="relative flex flex-col gap-8">
                   <input
                     type="text"
-                    placeholder="Establish new ritual..."
-                    className="w-full bg-black/40 border border-white/10 rounded-2xl md:rounded-[2rem] px-6 md:px-10 py-4 md:py-6 text-white font-bold focus:ring-2 focus:ring-red-600 focus:outline-none transition-all placeholder:text-slate-800 text-xl md:text-2xl"
+                    placeholder="New Sequence..."
+                    className="w-full bg-black/60 border border-white/10 rounded-[2.5rem] px-10 py-6 text-white font-black focus:ring-4 focus:ring-red-600/20 focus:outline-none transition-all placeholder:text-slate-800 text-3xl"
                     value={newTaskTitle}
                     onChange={(e) => setNewTaskTitle(e.target.value)}
                   />
-                  <div className="flex flex-col sm:flex-row gap-4">
+                  <div className="flex flex-col sm:flex-row gap-6">
                     <input
                       type="time"
-                      className="flex-1 sm:flex-none bg-black/40 border border-white/10 rounded-xl md:rounded-[1.5rem] px-6 py-4 md:py-6 text-white font-black [color-scheme:dark]"
+                      className="flex-1 bg-black/60 border border-white/10 rounded-[2rem] px-8 py-5 text-white font-black [color-scheme:dark]"
                       value={newTaskReminderTime}
                       onChange={(e) => setNewTaskReminderTime(e.target.value)}
                     />
-                    <button type="submit" className="flex-1 sm:flex-none bg-red-600 hover:bg-red-500 text-white px-8 md:px-12 py-4 md:py-0 rounded-xl md:rounded-[2rem] font-black uppercase text-[10px] md:text-[11px] tracking-widest transition-all shadow-lg active:scale-95">Deploy</button>
+                    <button type="submit" className="px-16 py-5 bg-red-600 hover:bg-red-500 text-white rounded-[2rem] font-black uppercase text-[14px] tracking-[0.3em] transition-all active:scale-95 shadow-2xl">Deploy</button>
                   </div>
                 </div>
-                <label className="flex items-center gap-3 md:gap-4 cursor-pointer group w-fit">
+                <label className="flex items-center gap-5 cursor-pointer group/label w-fit">
                   <input type="checkbox" className="hidden" checked={isNewTaskRepeating} onChange={(e) => setIsNewTaskRepeating(e.target.checked)} />
-                  <div className={`w-6 h-6 md:w-8 md:h-8 rounded-lg md:rounded-xl border-2 flex items-center justify-center transition-all ${isNewTaskRepeating ? 'bg-red-600 border-red-600' : 'border-slate-800 group-hover:border-slate-600'}`}>
-                    {isNewTaskRepeating && <i className="fa-solid fa-repeat text-[10px] md:text-[12px]"></i>}
+                  <div className={`w-10 h-10 rounded-2xl border-2 flex items-center justify-center transition-all ${isNewTaskRepeating ? 'bg-red-600 border-red-600 shadow-lg' : 'border-slate-800'}`}>
+                    {isNewTaskRepeating && <i className="fa-solid fa-repeat text-white"></i>}
                   </div>
-                  <span className="text-[8px] md:text-[10px] font-black uppercase tracking-widest text-slate-500 group-hover:text-slate-300 transition-colors">Daily ritual mode</span>
+                  <span className="text-[12px] font-black uppercase tracking-[0.2em] text-slate-500 group-hover/label:text-slate-300">Daily Loop</span>
                 </label>
               </form>
 
-              <div className="space-y-4 md:space-y-6">
+              <div className="space-y-6">
                 {tasks.map(task => (
-                  <div key={task.id} className={`group flex items-center gap-4 md:gap-6 p-4 md:p-7 rounded-[1.5rem] md:rounded-[2.5rem] border transition-all duration-500 ${task.completed ? 'bg-red-600/[0.02] border-red-600/10 opacity-50' : 'bg-white/[0.02] border-white/5 hover:border-white/10 shadow-xl'}`}>
-                    <button onClick={() => toggleTask(task.id)} className={`w-10 h-10 md:w-12 md:h-12 rounded-xl md:rounded-2xl border-2 flex items-center justify-center transition-all duration-300 flex-shrink-0 ${task.completed ? 'bg-red-600 border-red-600 shadow-lg' : 'border-slate-800 hover:border-red-600 sm:group-hover:scale-110'}`}>
-                      {task.completed && <i className="fa-solid fa-check text-white text-sm md:text-base"></i>}
+                  <div key={task.id} className={`group flex items-center gap-8 p-10 rounded-[3rem] border transition-all duration-700 ${task.completed ? 'bg-red-600/[0.02] border-red-600/20 opacity-40 grayscale' : 'bg-white/[0.03] border-white/5 hover:border-white/10 shadow-2xl hover:translate-x-2'}`}>
+                    <button onClick={() => toggleTask(task.id)} className={`w-16 h-16 rounded-[2rem] border-2 flex items-center justify-center transition-all duration-500 ${task.completed ? 'bg-red-600 border-red-600 shadow-xl' : 'border-slate-800 hover:border-red-600 hover:scale-110'}`}>
+                      {task.completed && <i className="fa-solid fa-check text-white text-2xl"></i>}
                     </button>
                     <div className="flex-1 min-w-0">
-                      <p className={`text-lg md:text-xl font-black truncate transition-all duration-500 ${task.completed ? 'line-through text-slate-700 italic' : 'text-slate-100'}`}>{task.title}</p>
-                      <div className="flex items-center gap-3 mt-1">
-                        {task.isRecurring && (
-                          <span className="text-[7px] md:text-[8px] font-black uppercase tracking-[0.2em] bg-red-600/10 text-red-500 px-2 py-0.5 rounded-md border border-red-600/20">Ritual</span>
-                        )}
-                        {task.reminderTime && (
-                          <span className="text-[7px] md:text-[9px] font-black uppercase tracking-widest text-slate-600 flex items-center gap-2">
-                            <i className="fa-regular fa-clock"></i> {task.reminderTime}
-                          </span>
-                        )}
+                      <p className={`text-3xl font-black truncate transition-all duration-700 ${task.completed ? 'line-through text-slate-700 italic' : 'text-slate-100'}`}>{task.title}</p>
+                      <div className="flex items-center gap-4 mt-2">
+                        {task.isRecurring && <span className="text-[10px] font-black uppercase tracking-[0.3em] bg-red-600/10 text-red-500 px-3 py-1 rounded-lg border border-red-600/20">Ritual</span>}
+                        {task.reminderTime && <span className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-600"><i className="fa-regular fa-bell mr-2"></i>{task.reminderTime}</span>}
                       </div>
                     </div>
-                    <button onClick={() => deleteTask(task)} className="text-slate-800 hover:text-red-500 p-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all flex-shrink-0">
-                      <i className="fa-solid fa-trash-can md:text-lg"></i>
+                    <button onClick={() => deleteTask(task)} className="text-slate-800 hover:text-red-500 p-4 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-all">
+                      <i className="fa-solid fa-trash-can text-2xl"></i>
                     </button>
                   </div>
                 ))}
-                {tasks.length === 0 && (
-                  <div className="text-center py-20 md:py-32 opacity-20 animate-pulse">
-                    <i className="fa-solid fa-ghost text-4xl md:text-6xl mb-4 md:mb-6"></i>
-                    <p className="font-black uppercase tracking-[0.3em] md:tracking-[0.5em] text-[8px] md:text-[10px]">Zero Rituals Active</p>
-                  </div>
-                )}
               </div>
             </div>
           </div>
         ) : activeTab === 'progress' ? (
-          <div className="max-w-3xl mx-auto space-y-8 md:space-y-12 animate-in fade-in slide-in-from-bottom-5 duration-700">
-             <div className="flex flex-col sm:flex-row items-center justify-between gap-4 md:gap-0">
-                <h2 className="text-3xl md:text-4xl font-black italic uppercase tracking-tighter">Analytics</h2>
-                <div className="flex items-center gap-2 md:gap-4 bg-white/5 p-1.5 md:p-2 rounded-xl md:rounded-2xl border border-white/10 shadow-lg w-full sm:w-auto justify-between sm:justify-start">
-                   <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() - 1)))} className="p-2 md:p-3 hover:text-red-500 transition-colors"><i className="fa-solid fa-chevron-left text-xs"></i></button>
-                   <span className="text-[9px] md:text-[11px] font-black uppercase tracking-widest min-w-[120px] md:min-w-[140px] text-center">{currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
-                   <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() + 1)))} className="p-2 md:p-3 hover:text-red-500 transition-colors"><i className="fa-solid fa-chevron-right text-xs"></i></button>
+          <div className="max-w-4xl mx-auto space-y-16 animate-in fade-in slide-in-from-bottom-10">
+             <div className="flex items-center justify-between gap-8">
+                <h2 className="text-5xl font-black italic uppercase tracking-tighter">Persistence History</h2>
+                <div className="flex items-center gap-4 bg-white/5 p-3 rounded-[1.5rem] border border-white/10 shadow-2xl">
+                   <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() - 1)))} className="p-4 hover:text-red-500"><i className="fa-solid fa-chevron-left"></i></button>
+                   <span className="text-[13px] font-black uppercase tracking-[0.3em] min-w-[200px] text-center">{currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
+                   <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() + 1)))} className="p-4 hover:text-red-500"><i className="fa-solid fa-chevron-right"></i></button>
                 </div>
              </div>
-             <div className="bg-white/[0.02] p-6 md:p-12 rounded-[2rem] md:rounded-[3.5rem] border border-white/5 shadow-2xl backdrop-blur-md overflow-x-auto">
-                <div className="min-w-[280px]">
-                  <div className="grid grid-cols-7 gap-2 md:gap-4 mb-4 md:mb-8">
-                    {['S','M','T','W','T','F','S'].map(d => <div key={d} className="text-center text-[8px] md:text-[10px] font-black text-slate-800 uppercase tracking-widest">{d}</div>)}
+             <div className="bg-white/[0.02] p-16 rounded-[4rem] border border-white/5 shadow-3xl backdrop-blur-2xl overflow-x-auto">
+                <div className="min-w-[400px]">
+                  <div className="grid grid-cols-7 gap-6 mb-12">
+                    {['S','M','T','W','T','F','S'].map(d => <div key={d} className="text-center text-[12px] font-black text-slate-800 uppercase tracking-widest">{d}</div>)}
                   </div>
-                  <div className="grid grid-cols-7 gap-2 md:gap-4">
+                  <div className="grid grid-cols-7 gap-6">
                     {calendarDays.map((date, idx) => {
                       if (!date) return <div key={`empty-${idx}`} className="aspect-square"></div>;
                       const status = getDayStatus(date);
-                      const isToday = date.toDateString() === new Date().toDateString();
+                      const isToday = getLocalDateStr(date) === getLocalDateStr();
                       return (
-                        <div key={idx} className={`aspect-square rounded-lg md:rounded-2xl flex items-center justify-center transition-all duration-300 sm:hover:scale-110 ${status === 'complete' ? 'bg-red-600 shadow-[0_5px_15px_rgba(220,38,38,0.3)]' : status === 'partial' ? 'bg-red-900/20 border border-red-900/40' : 'bg-white/5 border border-white/5'} ${isToday ? 'ring-1 md:ring-2 ring-white ring-offset-2 md:ring-offset-4 ring-offset-black' : ''}`}>
-                          <span className={`text-[9px] md:text-[11px] font-black ${status === 'complete' ? 'text-white' : 'text-slate-800'}`}>{date.getDate()}</span>
+                        <div key={idx} className={`aspect-square rounded-[2rem] flex items-center justify-center transition-all duration-500 group relative ${status === 'complete' ? 'bg-red-600 shadow-2xl' : status === 'partial' ? 'bg-red-900/20 border border-red-900/40' : 'bg-white/5 border border-white/5'} ${isToday ? 'ring-2 ring-white ring-offset-8 ring-offset-black' : ''}`}>
+                          <span className={`text-[18px] font-black ${status === 'complete' ? 'text-white' : 'text-slate-800'}`}>{date.getDate()}</span>
                         </div>
                       );
                     })}
@@ -474,20 +421,20 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
              </div>
           </div>
         ) : (
-          <div className="max-w-2xl mx-auto space-y-8 md:space-y-12 animate-in fade-in slide-in-from-bottom-5 duration-700">
-             <h2 className="text-3xl md:text-4xl font-black italic uppercase text-center tracking-tighter">Profile Settings</h2>
-             <div className="bg-white/[0.02] p-8 md:p-16 rounded-[2.5rem] md:rounded-[4rem] border border-white/5 shadow-2xl space-y-8 md:space-y-12 backdrop-blur-md">
-                <div className="flex flex-col sm:flex-row items-center justify-between gap-6 sm:gap-0 text-center sm:text-left">
+          <div className="max-w-2xl mx-auto space-y-16 animate-in fade-in slide-in-from-bottom-10">
+             <h2 className="text-5xl font-black italic uppercase text-center tracking-tighter">Configuration</h2>
+             <div className="bg-white/[0.02] p-20 rounded-[5rem] border border-white/5 shadow-3xl space-y-16 backdrop-blur-3xl relative overflow-hidden">
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-8 text-center sm:text-left relative z-10">
                   <div>
-                    <h3 className="text-xl md:text-2xl font-black tracking-tight sm:hover:text-red-500 transition-colors">System Alerts</h3>
-                    <p className="text-slate-500 text-[8px] md:text-[10px] font-black uppercase tracking-widest mt-1">Cross-Platform Sync</p>
+                    <h3 className="text-3xl font-black italic">Satellite Signals</h3>
+                    <p className="text-slate-500 text-[12px] font-black uppercase tracking-[0.4em] mt-2">Mobile Notification Sync</p>
                   </div>
-                  <button onClick={() => Notification.requestPermission()} className="w-full sm:w-auto px-6 md:px-8 py-3 bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white border border-red-600/20 rounded-xl md:rounded-2xl text-[8px] md:text-[10px] font-black uppercase tracking-widest transition-all">Enable</button>
+                  <button onClick={() => Notification.requestPermission()} className="w-full sm:w-auto px-12 py-5 bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white border border-red-600/20 rounded-2xl text-[12px] font-black uppercase tracking-[0.5em] transition-all shadow-xl active:scale-95">Link Device</button>
                 </div>
-                <div className="pt-8 md:pt-10 border-t border-white/5 text-center">
-                  <p className="text-[8px] md:text-[10px] font-black text-slate-800 uppercase tracking-[0.3em] md:tracking-[0.4em] italic leading-relaxed">
-                    Identity Encryption Active <br/>
-                    Node Status: SECURE
+                <div className="pt-16 border-t border-white/5 text-center relative z-10">
+                  <p className="text-[12px] font-black text-slate-800 uppercase tracking-[0.6em] italic leading-loose">
+                    Persistence Protocol: OPTIMAL <br/>
+                    Engine: STRIKEFLOW-V5
                   </p>
                 </div>
              </div>
@@ -495,10 +442,10 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
         )}
       </main>
 
-      {/* Toast Notification */}
-      <div className={`fixed bottom-6 md:bottom-12 left-1/2 -translate-x-1/2 transition-all duration-500 z-50 w-[90%] sm:w-auto ${toast.visible ? 'opacity-100 scale-100' : 'opacity-0 scale-90 pointer-events-none translate-y-10'}`}>
-        <div className="bg-white text-black px-6 md:px-12 py-3 md:py-5 rounded-full shadow-2xl font-black text-[9px] md:text-[11px] uppercase tracking-widest flex items-center justify-center gap-4 md:gap-6 border-b-4 border-red-600">
-          <i className="fa-solid fa-bolt text-red-600 animate-pulse"></i>
+      {/* Toast Alert */}
+      <div className={`fixed bottom-10 left-1/2 -translate-x-1/2 transition-all duration-700 z-50 w-[90%] sm:w-auto ${toast.visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-20 pointer-events-none'}`}>
+        <div className="bg-white text-black px-16 py-8 rounded-full shadow-4xl font-black text-[14px] uppercase tracking-[0.4em] flex items-center justify-center gap-8 border-b-8 border-red-600">
+          <i className="fa-solid fa-bolt-lightning text-red-600 animate-pulse text-2xl"></i>
           {toast.message}
         </div>
       </div>
