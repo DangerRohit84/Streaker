@@ -10,9 +10,9 @@ const User = require('./models/User');
 const Task = require('./models/Task');
 
 const app = express();
-const PORT = process.env.PORT ;
+const PORT = process.env.PORT;
 
-const MONGODB_URI = process.env.MONGODB_URI ;
+const MONGODB_URI = process.env.MONGODB_URI;
 
 app.set('trust proxy', 1);
 
@@ -22,7 +22,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Database connection with increased timeout for production stability
+// Database connection
 const connectDB = async () => {
   try {
     await mongoose.connect(MONGODB_URI, {
@@ -39,7 +39,7 @@ const connectDB = async () => {
 connectDB();
 
 app.use(session({
-  name: 'strikeflow_v6_sid',
+  name: 'strikeflow_v7_sid',
   secret: process.env.SESSION_SECRET || 'strikeflow-high-entropy-persistence-key',
   resave: false,
   saveUninitialized: false,
@@ -59,10 +59,6 @@ app.use(session({
 const asyncHandler = fn => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
-
-/**
- * STRIKEFLOW PERSISTENCE API V6
- */
 
 app.get('/api/health', (req, res) => res.status(200).send('OPTIMAL'));
 
@@ -119,12 +115,13 @@ app.get('/api/tasks', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/tasks', asyncHandler(async (req, res) => {
-  const data = req.body;
-  // Upsert ensures we update the existing record for that specific date or create it
+  // CRITICAL: Strip internal Mongo fields to avoid E11000 duplicate key errors
+  const { _id, __v, ...taskData } = req.body;
+  
   const task = await Task.findOneAndUpdate(
-    { id: data.id },
-    data,
-    { upsert: true, new: true }
+    { id: taskData.id },
+    { $set: taskData },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
   );
   res.json(task);
 }));
@@ -137,7 +134,6 @@ app.delete('/api/tasks/:id', asyncHandler(async (req, res) => {
 app.delete('/api/tasks', asyncHandler(async (req, res) => {
   const { title, recurring } = req.query;
   if (recurring === 'true') {
-    // When deleting a recurring task, we delete all instances with that title
     await Task.deleteMany({ title, isRecurring: true });
   }
   res.sendStatus(200);
@@ -145,13 +141,13 @@ app.delete('/api/tasks', asyncHandler(async (req, res) => {
 
 app.post('/api/logout', (req, res) => {
   req.session.destroy();
-  res.clearCookie('strikeflow_v6_sid', { secure: true, sameSite: 'none' });
+  res.clearCookie('strikeflow_v7_sid', { secure: true, sameSite: 'none' });
   res.sendStatus(200);
 });
 
 app.use((err, req, res, next) => {
   console.error('🔥 SYSTEM ERROR:', err.stack);
-  res.status(500).json({ error: 'INTERNAL_NODE_ERROR' });
+  res.status(500).json({ error: 'INTERNAL_SERVER_ERROR' });
 });
 
-app.listen(PORT, () => console.log(`🚀 persistence-api-node online on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 persistence-node active on port ${PORT}`));
