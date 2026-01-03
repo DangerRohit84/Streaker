@@ -115,15 +115,24 @@ app.get('/api/tasks', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/tasks', asyncHandler(async (req, res) => {
-  // CRITICAL: Strip internal Mongo fields to avoid E11000 duplicate key errors
   const { _id, __v, ...taskData } = req.body;
-  
   const task = await Task.findOneAndUpdate(
     { id: taskData.id },
     { $set: taskData },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
   res.json(task);
+}));
+
+/**
+ * HARD RESET: Purge tasks after a specific date for a user
+ */
+app.delete('/api/tasks/purge', asyncHandler(async (req, res) => {
+  const { userId, afterDate } = req.query;
+  if (!userId || !afterDate) return res.status(400).json({ error: 'MISSING_PARAMETERS' });
+  
+  await Task.deleteMany({ userId, date: { $gt: afterDate } });
+  res.json({ message: 'PURGE_COMPLETE' });
 }));
 
 app.delete('/api/tasks/:id', asyncHandler(async (req, res) => {
