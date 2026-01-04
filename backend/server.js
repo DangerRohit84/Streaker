@@ -62,6 +62,32 @@ const asyncHandler = fn => (req, res, next) => {
 
 app.get('/api/health', (req, res) => res.status(200).send('OPTIMAL'));
 
+/**
+ * ADMIN & USER MANAGEMENT ENDPOINTS
+ */
+
+// Get all users for admin dashboard (Secured)
+app.get('/api/admin/users', asyncHandler(async (req, res) => {
+  if (!req.session || !req.session.userId) {
+    return res.status(401).json({ error: 'UNAUTHORIZED' });
+  }
+  
+  const admin = await User.findOne({ id: req.session.userId });
+  if (!admin || admin.role !== 'admin') {
+    return res.status(403).json({ error: 'FORBIDDEN' });
+  }
+
+  // Return all users, excluding passwords
+  const users = await User.find({}, '-password').sort({ streakCount: -1 });
+  res.json(users);
+}));
+
+// Check for existing users (Public for Registration)
+app.get('/api/users/check', asyncHandler(async (req, res) => {
+  const users = await User.find({}, 'username');
+  res.json(users);
+}));
+
 app.get('/api/session', asyncHandler(async (req, res) => {
   if (req.session && req.session.userId) {
     const user = await User.findOne({ id: req.session.userId });
