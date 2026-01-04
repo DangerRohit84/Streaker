@@ -324,7 +324,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       <header className="max-w-7xl mx-auto px-6 py-12 flex flex-col xl:flex-row items-center justify-between gap-10">
         <div className="flex items-center gap-6 group">
           <div className="p-5 bg-red-600 rounded-[2rem] shadow-[0_20px_50px_rgba(220,38,38,0.5)] transition-all group-hover:scale-105">
-            <i className="fa-solid fa-fire-glow text-3xl"></i>
+            <i className="fa-solid fa-fire text-3xl"></i>
           </div>
           <div>
             <h1 className="text-4xl md:text-5xl font-black italic uppercase tracking-tighter">StrikeFlow</h1>
