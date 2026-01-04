@@ -105,6 +105,14 @@ export const dbService = {
     }
   },
 
+  purgeTasksAfterDate: async (userId: string, afterDate: string): Promise<void> => {
+    try {
+      await fetch(`${API_BASE_URL}/tasks/purge?userId=${userId}&afterDate=${afterDate}`, { method: 'DELETE', credentials: 'include' });
+    } catch (err) {
+      console.error("Purge failed", err);
+    }
+  },
+
   deleteTask: async (taskId: string, title?: string, isRecurring?: boolean): Promise<void> => {
     const query = isRecurring ? `?title=${encodeURIComponent(title || '')}&recurring=true` : `/${taskId}`;
     await fetch(`${API_BASE_URL}/tasks${query}`, { method: 'DELETE', credentials: 'include' });
