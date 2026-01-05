@@ -38,8 +38,8 @@ const App: React.FC = () => {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
-          {/* <div className="w-12 h-12 border-4 border-red-600 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-red-500 font-bold uppercase tracking-widest text-xs">Connecting to Database...</p> */}
+          <div className="w-12 h-12 border-4 border-red-600 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-red-500 font-bold uppercase tracking-widest text-xs">Connecting to Database...</p>
         </div>
       </div>
     );
