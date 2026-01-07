@@ -36,8 +36,12 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     }
   };
 
+  /**
+   * NUCLEAR STREAK ENGINE
+   * If any day with tasks was left incomplete, the entire persistence log (the "array of yes") is wiped.
+   */
   const analyzeStreakAndFailures = useCallback((history: Task[]) => {
-    if (!history || history.length === 0) return { streak: 0, failureDate: null };
+    if (!history || history.length === 0) return { streak: 0, failureDate: null, newLog: [] };
     
     const tasksByDate: Record<string, Task[]> = {};
     history.forEach(t => {
@@ -48,6 +52,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
     const todayStr = getLocalDateStr();
     const joinDateStr = user.joinDate.split('T')[0];
+    const sortedDates = Object.keys(tasksByDate).sort((a, b) => b.localeCompare(a));
 
     const isDayPerfect = (dateStr: string) => {
       const dayTasks = tasksByDate[dateStr] || [];
@@ -57,49 +62,58 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
     let streak = 0;
     let failureDate: string | null = null;
+    let newLog: string[] = [];
+    
+    // Nuclear Check: Iterate backwards from today to join date
     let checkDate = new Date();
-    
-    const todayIsPerfect = isDayPerfect(todayStr);
-    
-    let yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayIsPerfect = isDayPerfect(getLocalDateStr(yesterday));
+    let gapFound = false;
 
-    if (todayIsPerfect) {
-      streak = 1;
-      checkDate = yesterday;
-    } else if (yesterdayIsPerfect) {
-      streak = 0; 
-      checkDate = yesterday;
-    } else {
-      streak = 0;
-      failureDate = getLocalDateStr(yesterday);
-    }
-
-    if (streak > 0 || yesterdayIsPerfect) {
-      let safety = 0;
-      while (safety < 3650) {
-        const dStr = getLocalDateStr(checkDate);
+    while (getLocalDateStr(checkDate) >= joinDateStr) {
+      const dStr = getLocalDateStr(checkDate);
+      const dayTasks = tasksByDate[dStr] || [];
+      
+      if (dStr === todayStr) {
         if (isDayPerfect(dStr)) {
-          streak++;
-          checkDate.setDate(checkDate.getDate() - 1);
-        } else {
-          if (dStr < joinDateStr) break;
-          failureDate = dStr;
-          break;
+          streak = 1;
+          newLog.unshift(dStr);
         }
-        safety++;
+        checkDate.setDate(checkDate.getDate() - 1);
+        continue;
       }
+
+      if (dayTasks.length > 0) {
+        if (isDayPerfect(dStr)) {
+          if (!gapFound) streak++;
+          newLog.unshift(dStr);
+        } else {
+          // NUCLEAR RESET TRIGGERED
+          failureDate = dStr;
+          gapFound = true;
+          // As per request: "if user failed to complete task remove all yes"
+          // We stop counting and will clear everything before this date
+          break; 
+        }
+      }
+      checkDate.setDate(checkDate.getDate() - 1);
     }
 
-    return { streak, failureDate };
+    if (gapFound) {
+      // Clear all progress if a failure occurred
+      return { streak: 0, failureDate, newLog: [] };
+    }
+
+    return { streak, failureDate: null, newLog };
   }, [user.joinDate, getLocalDateStr]);
 
-  const syncStreakToCloud = useCallback(async (newCount: number) => {
-    if (newCount !== user.streakCount) {
+  const syncStateToCloud = useCallback(async (newCount: number, newLog: string[]) => {
+    const logChanged = JSON.stringify(newLog) !== JSON.stringify(user.persistenceLog);
+    const countChanged = newCount !== user.streakCount;
+
+    if (logChanged || countChanged) {
       const updatedUser = { 
         ...user, 
         streakCount: newCount,
+        persistenceLog: newLog,
         lastCompletedDate: newCount > 0 ? getLocalDateStr() : user.lastCompletedDate
       };
       onUpdateUser(updatedUser);
@@ -115,15 +129,13 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     setIsLoading(true);
     try {
       let history = await dbService.getAllTasks(user.id);
-      const { streak, failureDate } = analyzeStreakAndFailures(history);
+      const { streak, failureDate, newLog } = analyzeStreakAndFailures(history);
       
       if (failureDate) {
-        const tasksAfterFailure = history.filter(t => t.date > failureDate);
-        if (tasksAfterFailure.length > 0) {
-           triggerToast("SEQUENCE BREACH: PURGING POST-FAILURE DATA");
-           await dbService.purgeTasksAfterDate(user.id, failureDate);
-           history = await dbService.getAllTasks(user.id);
-        }
+        triggerToast("NUCLEAR RESET: SEQUENCE BREACH DETECTED ☢️");
+        // Wipe all tasks recorded after the failure to start clean
+        await dbService.purgeTasksAfterDate(user.id, failureDate);
+        history = await dbService.getAllTasks(user.id);
       }
 
       const today = getLocalDateStr();
@@ -155,13 +167,13 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       const currentTasks = [...todaysActual, ...virtualRituals];
       setTasks(currentTasks);
       setAllHistoryTasks(history);
-      syncStreakToCloud(streak);
+      syncStateToCloud(streak, newLog);
     } catch (err) {
-      triggerToast("Sync Error");
+      triggerToast("Network Synchronization Error");
     } finally {
       setIsLoading(false);
     }
-  }, [user.id, analyzeStreakAndFailures, syncStreakToCloud, getLocalDateStr]);
+  }, [user.id, analyzeStreakAndFailures, syncStateToCloud, getLocalDateStr]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -169,7 +181,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       if (now !== lastCheckedDate.current) {
         lastCheckedDate.current = now;
         loadData();
-        triggerToast("New Day: Sequence Reset 🌑");
+        triggerToast("Daily Cycle Reset 🌑");
       }
     }, 15000);
     return () => clearInterval(timer);
@@ -181,7 +193,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
   const triggerToast = (msg: string) => {
     setToast({ message: msg, visible: true });
-    setTimeout(() => setToast(prev => ({ ...prev, visible: false })), 3000);
+    setTimeout(() => setToast(prev => ({ ...prev, visible: false })), 3500);
   };
 
   const addTask = async (e: React.FormEvent) => {
@@ -204,15 +216,15 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       setTasks(prev => [...prev, newTask]);
       setAllHistoryTasks(updatedHistory);
       
-      const { streak } = analyzeStreakAndFailures(updatedHistory);
-      syncStreakToCloud(streak);
+      const { streak, newLog } = analyzeStreakAndFailures(updatedHistory);
+      syncStateToCloud(streak, newLog);
       
       setNewTaskTitle('');
       setNewTaskReminderTime('');
       setIsNewTaskRepeating(false);
       triggerToast("Objective Locked 🔥");
     } catch (err) {
-      triggerToast("Deployment Error");
+      triggerToast("Failed to Deploy Objective");
     }
   };
 
@@ -237,15 +249,15 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
         : allHistoryTasks.map(t => t.id === taskId ? updated : t);
       
       setAllHistoryTasks(updatedHistory);
-      const { streak } = analyzeStreakAndFailures(updatedHistory);
-      syncStreakToCloud(streak);
+      const { streak, newLog } = analyzeStreakAndFailures(updatedHistory);
+      syncStateToCloud(streak, newLog);
       
       if (updated.completed) {
-        triggerToast("Validated ⚡");
-        sendNotification("Objective Secured", `You've completed: ${updated.title}`);
+        triggerToast("Objective Validated ⚡");
+        sendNotification("StrikeFlow: Validated", `Secured: ${updated.title}`);
       }
     } catch (err) {
-      triggerToast("Sync Node Failure");
+      triggerToast("Sync Protocol Failure");
       setTasks(prev => prev.map(t => t.id === updated.id ? target : t));
     }
   };
@@ -259,11 +271,11 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       const remainingHistory = allHistoryTasks.filter(t => t.id !== task.id);
       setTasks(remainingTasks);
       setAllHistoryTasks(remainingHistory);
-      const { streak } = analyzeStreakAndFailures(remainingHistory);
-      syncStreakToCloud(streak);
-      triggerToast("Purged");
+      const { streak, newLog } = analyzeStreakAndFailures(remainingHistory);
+      syncStateToCloud(streak, newLog);
+      triggerToast("Sequence Element Purged");
     } catch (err) {
-      triggerToast("Purge Error");
+      triggerToast("Purge Operation Failed");
     }
   };
 
@@ -280,9 +292,12 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
   const getDayStatus = (date: Date) => {
     const dStr = getLocalDateStr(date);
+    // Use the persistence log ('array of yes') for calendar status
+    if (user.persistenceLog.includes(dStr)) return 'complete';
+    
     const dayTasks = allHistoryTasks.filter(t => t.date === dStr);
     if (dayTasks.length === 0) return 'none';
-    return dayTasks.every(t => t.completed) ? 'complete' : 'partial';
+    return 'partial';
   };
 
   const doneCount = tasks.filter(t => t.completed).length;
@@ -295,13 +310,14 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
   if (isLoading) {
     return (
       <div className="min-h-screen bg-[#020202] flex items-center justify-center">
-        <div className="w-12 md:w-16 h-12 md:h-16 border-t-2 border-red-600 rounded-full animate-spin"></div>
+        <div className="w-12 h-12 border-t-2 border-red-600 rounded-full animate-spin"></div>
       </div>
     );
   }
 
   return (
     <div className="min-h-screen bg-[#020202] text-white font-sans selection:bg-red-600/30 pb-10">
+      {/* Background FX */}
       <div className="fixed inset-0 pointer-events-none -z-10">
         <div className="absolute top-[-10%] right-[-10%] w-[80%] h-[50%] bg-red-900/10 blur-[150px] rounded-full"></div>
         <div className="absolute bottom-[-10%] left-[-10%] w-[80%] h-[50%] bg-red-900/10 blur-[150px] rounded-full"></div>
@@ -314,7 +330,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
           </div>
           <div>
             <h1 className="text-3xl md:text-5xl font-black italic uppercase tracking-tighter">StrikeFlow</h1>
-            <p className="text-slate-600 text-[9px] font-black uppercase tracking-[0.4em] mt-1">V9: Fluid Persistence</p>
+            <p className="text-slate-600 text-[9px] font-black uppercase tracking-[0.4em] mt-1">V10: Isolated Nuclear Reset</p>
           </div>
         </div>
 
@@ -340,15 +356,15 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 md:gap-12">
             <div className="lg:col-span-4 space-y-6 md:space-y-8 animate-in fade-in slide-in-from-left-5 duration-700">
               <div className={`p-8 md:p-14 rounded-[2.5rem] md:rounded-[4rem] border transition-all duration-700 text-center relative overflow-hidden group shadow-3xl ${todayIsPerfect ? 'bg-red-600/10 border-red-600 shadow-[0_0_80px_rgba(220,38,38,0.2)]' : 'bg-white/[0.03] border-white/5'}`}>
-                <p className="text-slate-500 font-black text-[10px] md:text-[12px] uppercase tracking-[0.4em] mb-6 md:mb-10">Persistence Streak</p>
+                <p className="text-slate-500 font-black text-[10px] md:text-[12px] uppercase tracking-[0.4em] mb-6 md:mb-10">Persistence Score (Yes Count)</p>
                 <div className="flex items-center justify-center gap-4">
                   <span className={`text-[90px] md:text-[160px] font-black leading-none tracking-tighter ${todayIsPerfect ? 'text-white drop-shadow-[0_0_20px_white]' : 'text-slate-300'}`}>
-                    {user.streakCount}
+                    {user.persistenceLog.length}
                   </span>
                   <i className={`fa-solid fa-bolt text-3xl md:text-6xl ${todayIsPerfect ? 'text-red-500' : 'text-slate-800'}`}></i>
                 </div>
                 <p className={`mt-6 md:mt-10 text-[9px] md:text-[11px] font-black uppercase tracking-[0.3em] italic ${todayIsPerfect ? 'text-red-500' : 'text-slate-700'}`}>
-                  {todayIsPerfect ? 'Sequence Satisfied' : 'Engagement Required'}
+                  {todayIsPerfect ? 'Current Sequence Satisfied' : 'Pending Verification'}
                 </p>
               </div>
 
@@ -368,7 +384,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                 <div className="flex flex-col gap-4 md:gap-8">
                   <input
                     type="text"
-                    placeholder="Initiate Sequence..."
+                    placeholder="Initiate Sequence Element..."
                     className="w-full bg-black/60 border border-white/10 rounded-2xl md:rounded-[2.5rem] px-6 md:px-10 py-4 md:py-6 text-white font-black focus:ring-4 focus:ring-red-600/20 focus:outline-none transition-all placeholder:text-slate-800 text-xl md:text-3xl"
                     value={newTaskTitle}
                     onChange={(e) => setNewTaskTitle(e.target.value)}
@@ -410,13 +426,18 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                     </button>
                   </div>
                 ))}
+                {tasks.length === 0 && (
+                  <div className="text-center py-20 border-2 border-dashed border-white/5 rounded-[3rem]">
+                    <p className="text-slate-800 font-black uppercase tracking-[0.4em] text-xs">No Sequence Elements Detected</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
         ) : activeTab === 'progress' ? (
           <div className="max-w-4xl mx-auto space-y-10 md:space-y-16 animate-in fade-in slide-in-from-bottom-10 duration-700">
              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-                <h2 className="text-4xl md:text-5xl font-black italic uppercase tracking-tighter">Persistence Log</h2>
+                <h2 className="text-4xl md:text-5xl font-black italic uppercase tracking-tighter">Persistence History</h2>
                 <div className="flex items-center gap-3 bg-white/5 p-2 rounded-2xl border border-white/10 shadow-2xl w-fit">
                    <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() - 1)))} className="p-3 hover:text-red-500 transition-colors"><i className="fa-solid fa-chevron-left text-sm"></i></button>
                    <span className="text-[11px] md:text-[13px] font-black uppercase tracking-[0.2em] min-w-[140px] md:min-w-[180px] text-center">{currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
@@ -445,19 +466,19 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
           </div>
         ) : (
           <div className="max-w-2xl mx-auto space-y-10 md:space-y-16 animate-in fade-in slide-in-from-bottom-10 duration-700">
-             <h2 className="text-4xl md:text-5xl font-black italic uppercase text-center tracking-tighter">Configuration</h2>
+             <h2 className="text-4xl md:text-5xl font-black italic uppercase text-center tracking-tighter">System Configuration</h2>
              <div className="bg-white/[0.02] p-10 md:p-20 rounded-[3rem] md:rounded-[5rem] border border-white/5 shadow-3xl space-y-10 md:space-y-16 backdrop-blur-3xl">
                 <div className="flex flex-col sm:flex-row items-center justify-between gap-8 text-center sm:text-left">
                   <div>
-                    <h3 className="text-2xl md:text-3xl font-black italic">Push Hub</h3>
-                    <p className="text-slate-500 text-[10px] font-black uppercase tracking-[0.3em] mt-2">Mobile Integration Active</p>
+                    <h3 className="text-2xl md:text-3xl font-black italic">Notification Core</h3>
+                    <p className="text-slate-500 text-[10px] font-black uppercase tracking-[0.3em] mt-2">Mobile Persistence Link Active</p>
                   </div>
                   <button onClick={() => Notification.requestPermission()} className="w-full sm:w-auto px-10 md:px-12 py-4 md:py-5 bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white border border-red-600/20 rounded-xl md:rounded-2xl text-[10px] md:text-[12px] font-black uppercase tracking-[0.3em] transition-all shadow-xl active:scale-95">Link Device</button>
                 </div>
                 <div className="pt-10 md:pt-16 border-t border-white/5 text-center">
                   <p className="text-[10px] md:text-[12px] font-black text-slate-800 uppercase tracking-[0.4em] italic leading-loose">
-                    Security: PURGE-HARD-V9 <br className="sm:hidden"/>
-                    Persistence Model: OPERATIONAL
+                    Security: ISOLATED-V10 <br className="sm:hidden"/>
+                    Reset Logic: NUCLEAR-CLEAR
                   </p>
                 </div>
              </div>

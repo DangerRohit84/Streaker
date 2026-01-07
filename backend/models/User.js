@@ -9,6 +9,7 @@ const userSchema = new mongoose.Schema({
   email: { type: String, required: true },
   streakCount: { type: Number, default: 0 },
   lastCompletedDate: { type: String, default: null },
+  persistenceLog: { type: [String], default: [] }, // The "Array of Yes" - stores dates of 100% completion
   joinDate: { type: String, default: () => new Date().toISOString() },
   notificationSettings: {
     soundEnabled: { type: Boolean, default: true },

@@ -62,27 +62,23 @@ const asyncHandler = fn => (req, res, next) => {
 
 app.get('/api/health', (req, res) => res.status(200).send('OPTIMAL'));
 
-/**
- * ADMIN & USER MANAGEMENT ENDPOINTS
- */
-
-// Get all users for admin dashboard (Secured)
-app.get('/api/admin/users', asyncHandler(async (req, res) => {
+// Middleware to ensure user is logged in for protected routes
+const requireAuth = (req, res, next) => {
   if (!req.session || !req.session.userId) {
     return res.status(401).json({ error: 'UNAUTHORIZED' });
   }
-  
+  next();
+};
+
+app.get('/api/admin/users', requireAuth, asyncHandler(async (req, res) => {
   const admin = await User.findOne({ id: req.session.userId });
   if (!admin || admin.role !== 'admin') {
     return res.status(403).json({ error: 'FORBIDDEN' });
   }
-
-  // Return all users, excluding passwords
   const users = await User.find({}, '-password').sort({ streakCount: -1 });
   res.json(users);
 }));
 
-// Check for existing users (Public for Registration)
 app.get('/api/users/check', asyncHandler(async (req, res) => {
   const users = await User.find({}, 'username');
   res.json(users);
@@ -122,7 +118,15 @@ app.post('/api/users', asyncHandler(async (req, res) => {
   });
 }));
 
-app.put('/api/users/:id', asyncHandler(async (req, res) => {
+app.put('/api/users/:id', requireAuth, asyncHandler(async (req, res) => {
+  // Security: only allow users to update their own profile unless they are admin
+  if (req.session.userId !== req.params.id) {
+    const admin = await User.findOne({ id: req.session.userId });
+    if (!admin || admin.role !== 'admin') {
+      return res.status(403).json({ error: 'FORBIDDEN' });
+    }
+  }
+
   const { password, _id, __v, id, ...updateData } = req.body;
   const updatedUser = await User.findOneAndUpdate(
     { id: req.params.id },
@@ -133,43 +137,46 @@ app.put('/api/users/:id', asyncHandler(async (req, res) => {
   res.json(updatedUser);
 }));
 
-app.get('/api/tasks', asyncHandler(async (req, res) => {
-  const { userId } = req.query;
-  if (!userId) return res.status(400).json({ error: 'USER_ID_REQUIRED' });
-  const tasks = await Task.find({ userId }).sort({ date: -1 });
+/**
+ * TASK ENDPOINTS - STRICTLY FILTERED BY SESSION USERID
+ */
+
+app.get('/api/tasks', requireAuth, asyncHandler(async (req, res) => {
+  const tasks = await Task.find({ userId: req.session.userId }).sort({ date: -1 });
   res.json(tasks);
 }));
 
-app.post('/api/tasks', asyncHandler(async (req, res) => {
+app.post('/api/tasks', requireAuth, asyncHandler(async (req, res) => {
   const { _id, __v, ...taskData } = req.body;
+  
+  // Enforce ownership: task must belong to the logged in user
+  taskData.userId = req.session.userId;
+
   const task = await Task.findOneAndUpdate(
-    { id: taskData.id },
+    { id: taskData.id, userId: req.session.userId },
     { $set: taskData },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
   res.json(task);
 }));
 
-/**
- * HARD RESET: Purge tasks after a specific date for a user
- */
-app.delete('/api/tasks/purge', asyncHandler(async (req, res) => {
-  const { userId, afterDate } = req.query;
-  if (!userId || !afterDate) return res.status(400).json({ error: 'MISSING_PARAMETERS' });
+app.delete('/api/tasks/purge', requireAuth, asyncHandler(async (req, res) => {
+  const { afterDate } = req.query;
+  if (!afterDate) return res.status(400).json({ error: 'MISSING_DATE' });
   
-  await Task.deleteMany({ userId, date: { $gt: afterDate } });
+  await Task.deleteMany({ userId: req.session.userId, date: { $gt: afterDate } });
   res.json({ message: 'PURGE_COMPLETE' });
 }));
 
-app.delete('/api/tasks/:id', asyncHandler(async (req, res) => {
-  await Task.deleteOne({ id: req.params.id });
+app.delete('/api/tasks/:id', requireAuth, asyncHandler(async (req, res) => {
+  await Task.deleteOne({ id: req.params.id, userId: req.session.userId });
   res.sendStatus(200);
 }));
 
-app.delete('/api/tasks', asyncHandler(async (req, res) => {
+app.delete('/api/tasks', requireAuth, asyncHandler(async (req, res) => {
   const { title, recurring } = req.query;
   if (recurring === 'true') {
-    await Task.deleteMany({ title, isRecurring: true });
+    await Task.deleteMany({ userId: req.session.userId, title, isRecurring: true });
   }
   res.sendStatus(200);
 }));

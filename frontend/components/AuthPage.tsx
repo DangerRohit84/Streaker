@@ -35,12 +35,14 @@ const AuthPage: React.FC<AuthPageProps> = ({ onLogin }) => {
           return;
         }
         
+        // Fix: Added missing 'persistenceLog' property to conform to the User interface.
         const newUser: User = {
           id: crypto.randomUUID(),
           username,
           email,
           streakCount: 0,
           lastCompletedDate: null,
+          persistenceLog: [],
           joinDate: new Date().toISOString()
         };
         

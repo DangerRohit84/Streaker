@@ -7,6 +7,7 @@ export interface User {
   email: string;
   streakCount: number;
   lastCompletedDate: string | null;
+  persistenceLog: string[]; // The "Array of Yes" - stores dates of 100% completion
   joinDate: string;
   notificationSettings?: NotificationSettings;
 }
