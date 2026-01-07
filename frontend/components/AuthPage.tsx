@@ -35,14 +35,17 @@ const AuthPage: React.FC<AuthPageProps> = ({ onLogin }) => {
           return;
         }
         
-        // Fix: Added missing 'persistenceLog' property to conform to the User interface.
+        // Added missing 'lastActiveDate', 'taskDefinitions', and 'completedToday' properties to satisfy the User interface.
         const newUser: User = {
           id: crypto.randomUUID(),
           username,
           email,
           streakCount: 0,
           lastCompletedDate: null,
+          lastActiveDate: null,
           persistenceLog: [],
+          taskDefinitions: [],
+          completedToday: [],
           joinDate: new Date().toISOString()
         };
         

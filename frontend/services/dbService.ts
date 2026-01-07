@@ -33,11 +33,24 @@ async function hashPassword(password: string): Promise<string> {
 }
 
 const fetchOptions = (method: string, body?: any): RequestInit => ({
+  // credentials: 'include' is handled individually to ensure consistency
   method,
   headers: { 'Content-Type': 'application/json' },
   body: body ? JSON.stringify(body) : undefined,
   credentials: 'include',
 });
+
+// Helper to ensure older user records have new fields initialized
+const normalizeUser = (user: any): User => {
+  if (!user) return user;
+  return {
+    ...user,
+    persistenceLog: user.persistenceLog || [],
+    taskDefinitions: user.taskDefinitions || [],
+    completedToday: user.completedToday || [],
+    streakCount: user.streakCount || 0
+  };
+};
 
 export const dbService = {
   ping: async (): Promise<boolean> => {
@@ -53,7 +66,7 @@ export const dbService = {
     const hashedPassword = await hashPassword(plainPassword);
     try {
       const response = await fetch(`${API_BASE_URL}/login`, fetchOptions('POST', { username, password: hashedPassword }));
-      return response.ok ? await response.json() : null;
+      return response.ok ? normalizeUser(await response.json()) : null;
     } catch {
       return null;
     }
@@ -72,7 +85,7 @@ export const dbService = {
     try {
       const response = await fetch(url, fetchOptions(method, payload));
       if (!response.ok) throw new Error(`API error ${response.status}`);
-      return await response.json();
+      return normalizeUser(await response.json());
     } catch (err: any) {
       throw new Error(err.message || 'Connection lost.');
     }
@@ -121,7 +134,7 @@ export const dbService = {
   getSession: async (): Promise<User | null> => {
     try {
       const response = await fetch(`${API_BASE_URL}/session`, { credentials: 'include' });
-      return response.ok ? await response.json() : null;
+      return response.ok ? normalizeUser(await response.json()) : null;
     } catch {
       return null;
     }
@@ -136,7 +149,7 @@ export const dbService = {
   getUsers: async (): Promise<User[]> => {
     try {
       const response = await fetch(`${API_BASE_URL}/users/check`, { credentials: 'include' });
-      return response.ok ? await response.json() : [];
+      return response.ok ? (await response.json()).map(normalizeUser) : [];
     } catch {
       return [];
     }
@@ -145,7 +158,7 @@ export const dbService = {
   getAdminUsers: async (): Promise<User[]> => {
     try {
       const response = await fetch(`${API_BASE_URL}/admin/users`, { credentials: 'include' });
-      return response.ok ? await response.json() : [];
+      return response.ok ? (await response.json()).map(normalizeUser) : [];
     } catch {
       return [];
     }

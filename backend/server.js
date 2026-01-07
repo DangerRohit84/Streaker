@@ -7,7 +7,6 @@ const cors = require('cors');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const User = require('./models/User');
-const Task = require('./models/Task');
 
 const app = express();
 const PORT = process.env.PORT;
@@ -62,7 +61,6 @@ const asyncHandler = fn => (req, res, next) => {
 
 app.get('/api/health', (req, res) => res.status(200).send('OPTIMAL'));
 
-// Middleware to ensure user is logged in for protected routes
 const requireAuth = (req, res, next) => {
   if (!req.session || !req.session.userId) {
     return res.status(401).json({ error: 'UNAUTHORIZED' });
@@ -119,7 +117,6 @@ app.post('/api/users', asyncHandler(async (req, res) => {
 }));
 
 app.put('/api/users/:id', requireAuth, asyncHandler(async (req, res) => {
-  // Security: only allow users to update their own profile unless they are admin
   if (req.session.userId !== req.params.id) {
     const admin = await User.findOne({ id: req.session.userId });
     if (!admin || admin.role !== 'admin') {
@@ -137,48 +134,32 @@ app.put('/api/users/:id', requireAuth, asyncHandler(async (req, res) => {
   res.json(updatedUser);
 }));
 
-/**
- * TASK ENDPOINTS - STRICTLY FILTERED BY SESSION USERID
- */
-
-app.get('/api/tasks', requireAuth, asyncHandler(async (req, res) => {
-  const tasks = await Task.find({ userId: req.session.userId }).sort({ date: -1 });
-  res.json(tasks);
-}));
-
-app.post('/api/tasks', requireAuth, asyncHandler(async (req, res) => {
-  const { _id, __v, ...taskData } = req.body;
-  
-  // Enforce ownership: task must belong to the logged in user
-  taskData.userId = req.session.userId;
-
-  const task = await Task.findOneAndUpdate(
-    { id: taskData.id, userId: req.session.userId },
-    { $set: taskData },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
+// Task management is now integrated into User updates
+// but keeping a few dedicated routes for clarity if needed:
+app.post('/api/users/:id/tasks', requireAuth, asyncHandler(async (req, res) => {
+  if (req.session.userId !== req.params.id) return res.status(403).json({ error: 'FORBIDDEN' });
+  const { task } = req.body;
+  const user = await User.findOneAndUpdate(
+    { id: req.params.id },
+    { $push: { taskDefinitions: task } },
+    { new: true }
   );
-  res.json(task);
+  res.json(user);
 }));
 
-app.delete('/api/tasks/purge', requireAuth, asyncHandler(async (req, res) => {
-  const { afterDate } = req.query;
-  if (!afterDate) return res.status(400).json({ error: 'MISSING_DATE' });
-  
-  await Task.deleteMany({ userId: req.session.userId, date: { $gt: afterDate } });
-  res.json({ message: 'PURGE_COMPLETE' });
-}));
-
-app.delete('/api/tasks/:id', requireAuth, asyncHandler(async (req, res) => {
-  await Task.deleteOne({ id: req.params.id, userId: req.session.userId });
-  res.sendStatus(200);
-}));
-
-app.delete('/api/tasks', requireAuth, asyncHandler(async (req, res) => {
-  const { title, recurring } = req.query;
-  if (recurring === 'true') {
-    await Task.deleteMany({ userId: req.session.userId, title, isRecurring: true });
-  }
-  res.sendStatus(200);
+app.delete('/api/users/:id/tasks/:taskId', requireAuth, asyncHandler(async (req, res) => {
+  if (req.session.userId !== req.params.id) return res.status(403).json({ error: 'FORBIDDEN' });
+  const user = await User.findOneAndUpdate(
+    { id: req.params.id },
+    { 
+      $pull: { 
+        taskDefinitions: { id: req.params.taskId },
+        completedToday: req.params.taskId
+      } 
+    },
+    { new: true }
+  );
+  res.json(user);
 }));
 
 app.post('/api/logout', (req, res) => {

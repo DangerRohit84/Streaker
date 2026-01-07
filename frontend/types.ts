@@ -7,9 +7,19 @@ export interface User {
   email: string;
   streakCount: number;
   lastCompletedDate: string | null;
-  persistenceLog: string[]; // The "Array of Yes" - stores dates of 100% completion
+  lastActiveDate: string | null;
+  persistenceLog: string[]; // Dates where ALL tasks were done
+  taskDefinitions: TaskDefinition[];
+  completedToday: string[]; // IDs of taskDefinitions completed today
   joinDate: string;
   notificationSettings?: NotificationSettings;
+}
+
+export interface TaskDefinition {
+  id: string;
+  title: string;
+  reminderTime?: string;
+  createdAt?: string;
 }
 
 export interface NotificationSettings {
@@ -18,21 +28,15 @@ export interface NotificationSettings {
   snoozeDuration: number; // in minutes
 }
 
+// Keeping this for compatibility in UI components if needed
 export interface Task {
   id: string;
   userId: string;
   title: string;
   completed: boolean;
-  date: string; // ISO string YYYY-MM-DD
-  isRecurring: boolean; // True if it's a daily ritual
-  templateId?: string; // Links daily instances of the same ritual
-  reminderTime?: string; // Time string in HH:mm format
-  snoozedUntil?: string; // ISO string for snooze handling
-}
-
-export interface DailyActivity {
   date: string;
-  count: number;
+  isRecurring: boolean;
+  reminderTime?: string;
 }
 
 export interface AuthState {
