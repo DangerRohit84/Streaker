@@ -23,67 +23,96 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
 
   const triggerToast = (msg: string) => {
     setToast({ message: msg, visible: true });
-    setTimeout(() => setToast(prev => ({ ...prev, visible: false })), 3500);
+    setTimeout(() => setToast(prev => ({ ...prev, visible: false })), 4500);
+  };
+
+  const sendNotification = (title: string, body: string) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, {
+        body,
+        icon: 'https://cdn-icons-png.flaticon.com/512/599/599305.png'
+      });
+    }
   };
 
   /**
-   * NUCLEAR RESET & DAY TRANSITION
-   * Called on mount and periodically to handle date changes.
+   * SEQUENCE VALIDATOR (NUCLEAR ENGINE)
+   * Ensures the persistence log is a strictly contiguous sequence.
+   * If it breaks, it purges EVERYTHING.
    */
-  const handleDayTransition = useCallback(async (currentUser: User) => {
-    const today = getLocalDateStr();
-    
-    // Safety check for user properties
-    const safePersistenceLog = currentUser.persistenceLog || [];
-    const safeTaskDefinitions = currentUser.taskDefinitions || [];
-    
-    // If it's the same day, no transition needed
-    if (currentUser.lastActiveDate === today) return currentUser;
-
-    let updatedUser = { 
-      ...currentUser,
-      persistenceLog: safePersistenceLog,
-      taskDefinitions: safeTaskDefinitions,
-      completedToday: currentUser.completedToday || []
-    };
-    
+  const performSequenceValidation = useCallback(async (currentUser: User) => {
+    const todayStr = getLocalDateStr();
     const yesterdayDate = new Date();
     yesterdayDate.setDate(yesterdayDate.getDate() - 1);
     const yesterdayStr = getLocalDateStr(yesterdayDate);
-    const joinDateStr = currentUser.joinDate.split('T')[0];
+    
+    const safeLog = [...(currentUser.persistenceLog || [])].sort();
+    const safeTaskDefs = currentUser.taskDefinitions || [];
+    const lastActive = currentUser.lastActiveDate;
 
-    // NUCLEAR CHECK: Did user fail yesterday?
-    if (safeTaskDefinitions.length > 0 && currentUser.lastActiveDate && currentUser.lastActiveDate < today) {
-       // Check if the last active day was perfect
-       const wasLastActivePerfect = safePersistenceLog.includes(currentUser.lastActiveDate);
-       if (!wasLastActivePerfect || (currentUser.lastActiveDate < yesterdayStr && yesterdayStr >= joinDateStr)) {
-          triggerToast("NUCLEAR RESET: SEQUENCE BREACH ☢️");
-          updatedUser.persistenceLog = [];
-          updatedUser.streakCount = 0;
-       }
+    let needsUpdate = false;
+    let updatedUser = { ...currentUser };
+
+    // 1. Day Transition: If we've moved to a new calendar day
+    if (lastActive !== todayStr) {
+      updatedUser.lastActiveDate = todayStr;
+      updatedUser.completedToday = []; // Reset completions for the fresh day
+      needsUpdate = true;
     }
 
-    // Prepare for new day
-    updatedUser.lastActiveDate = today;
-    updatedUser.completedToday = [];
-    
-    // Save to cloud
-    try {
-      const saved = await dbService.saveUser(updatedUser, undefined, true);
-      onUpdateUser(saved);
-      return saved;
-    } catch (err) {
-      console.warn("Transition sync delayed");
-      onUpdateUser(updatedUser);
-      return updatedUser;
+    // 2. Strict Sequence Check
+    // If the user has tasks and a history, we check for a breach
+    if (safeTaskDefs.length > 0 && safeLog.length > 0) {
+      const lastEntry = safeLog[safeLog.length - 1];
+      
+      // BREACH CONDITION A: Gap in activity
+      // If the last success wasn't today or yesterday, the streak is dead.
+      const streakIsBroken = lastEntry !== todayStr && lastEntry !== yesterdayStr;
+
+      // BREACH CONDITION B: Incomplete "Yesterday"
+      // If the user was active yesterday (lastActive === yesterdayStr) 
+      // but didn't make it into the persistenceLog (wasLastActivePerfect === false)
+      const wasActiveYesterday = lastActive === yesterdayStr;
+      const finishedYesterday = safeLog.includes(yesterdayStr);
+      const failedToFinishYesterday = wasActiveYesterday && !finishedYesterday;
+
+      if (streakIsBroken || failedToFinishYesterday) {
+        updatedUser.persistenceLog = [];
+        updatedUser.streakCount = 0;
+        needsUpdate = true;
+        triggerToast("SEQUENCE BREACH: RELOAD WIPE ACTIVATED ☢️");
+        sendNotification("StrikeFlow Alert", "The sequence was broken. Records have been purged.");
+      }
+    }
+
+    if (needsUpdate) {
+      try {
+        const saved = await dbService.saveUser(updatedUser, undefined, true);
+        onUpdateUser(saved);
+      } catch (err) {
+        console.warn("Validation sync failed");
+        onUpdateUser(updatedUser);
+      }
     }
   }, [getLocalDateStr, onUpdateUser]);
 
+  // Mandatory checks on mount and visibility
   useEffect(() => {
-    handleDayTransition(user);
-    const timer = setInterval(() => handleDayTransition(user), 60000);
-    return () => clearInterval(timer);
-  }, []);
+    performSequenceValidation(user);
+    
+    const onFocus = () => performSequenceValidation(user);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') performSequenceValidation(user);
+    });
+
+    const timer = setInterval(() => performSequenceValidation(user), 60000);
+    
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      clearInterval(timer);
+    };
+  }, [user.id]);
 
   const addTask = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -132,7 +161,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
     };
     const today = getLocalDateStr();
 
-    // Check for "Perfect Day" (Array of Yes)
+    // Check for "Perfect Day"
     const allDone = safeTaskDefinitions.length > 0 && 
                     safeTaskDefinitions.every(def => newCompletedToday.includes(def.id));
     
@@ -141,9 +170,9 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
         updatedUser.persistenceLog = [...safePersistenceLog, today].sort();
         updatedUser.streakCount = updatedUser.persistenceLog.length;
         triggerToast("DAY VALIDATED: YES LOGGED ⚡");
+        sendNotification("StrikeFlow: Perfect Day!", `Sequence: ${updatedUser.streakCount} days.`);
       }
     } else {
-      // If they uncheck something on a previously perfect day
       if (safePersistenceLog.includes(today)) {
         updatedUser.persistenceLog = safePersistenceLog.filter(d => d !== today);
         updatedUser.streakCount = updatedUser.persistenceLog.length;
@@ -172,7 +201,6 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
       persistenceLog: safePersistenceLog
     };
 
-    // Recalculate perfection if list changes
     const today = getLocalDateStr();
     const allDone = updatedUser.taskDefinitions.length > 0 && 
                     updatedUser.taskDefinitions.every(def => updatedUser.completedToday.includes(def.id));
@@ -227,7 +255,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
           </div>
           <div>
             <h1 className="text-3xl md:text-5xl font-black italic uppercase tracking-tighter">StrikeFlow</h1>
-            <p className="text-slate-600 text-[9px] font-black uppercase tracking-[0.4em] mt-1">V11: Internal Array Validation</p>
+            <p className="text-slate-600 text-[9px] font-black uppercase tracking-[0.4em] mt-1">V13: Zero-Gap Permadeath</p>
           </div>
         </div>
 
@@ -253,7 +281,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 md:gap-12">
             <div className="lg:col-span-4 space-y-6 md:space-y-8 animate-in fade-in slide-in-from-left-5 duration-700">
               <div className={`p-8 md:p-14 rounded-[2.5rem] md:rounded-[4rem] border transition-all duration-700 text-center relative overflow-hidden group shadow-3xl ${todayIsPerfect ? 'bg-red-600/10 border-red-600 shadow-[0_0_80px_rgba(220,38,38,0.2)]' : 'bg-white/[0.03] border-white/5'}`}>
-                <p className="text-slate-500 font-black text-[10px] md:text-[12px] uppercase tracking-[0.4em] mb-6 md:mb-10">Array of Yes (Score)</p>
+                <p className="text-slate-500 font-black text-[10px] md:text-[12px] uppercase tracking-[0.4em] mb-6 md:mb-10">Consecutive Successes</p>
                 <div className="flex items-center justify-center gap-4">
                   <span className={`text-[90px] md:text-[160px] font-black leading-none tracking-tighter ${todayIsPerfect ? 'text-white drop-shadow-[0_0_20px_white]' : 'text-slate-300'}`}>
                     {(user.persistenceLog || []).length}
@@ -261,7 +289,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                   <i className={`fa-solid fa-bolt text-3xl md:text-6xl ${todayIsPerfect ? 'text-red-500' : 'text-slate-800'}`}></i>
                 </div>
                 <p className={`mt-6 md:mt-10 text-[9px] md:text-[11px] font-black uppercase tracking-[0.3em] italic ${todayIsPerfect ? 'text-red-500' : 'text-slate-700'}`}>
-                  {todayIsPerfect ? 'Today Logged as YES' : 'Incomplete Array'}
+                  {todayIsPerfect ? 'Active Node Secured' : 'Sequence Validation Pending'}
                 </p>
               </div>
 
@@ -329,7 +357,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
         ) : activeTab === 'progress' ? (
           <div className="max-w-4xl mx-auto space-y-10 md:space-y-16 animate-in fade-in slide-in-from-bottom-10 duration-700">
              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-                <h2 className="text-4xl md:text-5xl font-black italic uppercase tracking-tighter">Persistence Log</h2>
+                <h2 className="text-4xl md:text-5xl font-black italic uppercase tracking-tighter">Persistence History</h2>
                 <div className="flex items-center gap-3 bg-white/5 p-2 rounded-2xl border border-white/10 shadow-2xl w-fit">
                    <button onClick={() => setCurrentMonth(new Date(currentMonth.setMonth(currentMonth.getMonth() - 1)))} className="p-3 hover:text-red-500 transition-colors"><i className="fa-solid fa-chevron-left text-sm"></i></button>
                    <span className="text-[11px] md:text-[13px] font-black uppercase tracking-[0.2em] min-w-[140px] md:min-w-[180px] text-center">{currentMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
@@ -370,8 +398,8 @@ const Dashboard: React.FC<DashboardProps> = ({ user, onLogout, onUpdateUser }) =
                 </div>
                 <div className="pt-10 md:pt-16 border-t border-white/5 text-center">
                   <p className="text-[10px] md:text-[12px] font-black text-slate-800 uppercase tracking-[0.4em] italic leading-loose">
-                    Storage Engine: INTERNAL-ARRAY-V11 <br className="sm:hidden"/>
-                    Validation: LOG-ONLY
+                    Storage Engine: INTERNAL-ARRAY-V13 <br className="sm:hidden"/>
+                    Validation: CONTIGUITY-PROTOCOL
                   </p>
                 </div>
              </div>
